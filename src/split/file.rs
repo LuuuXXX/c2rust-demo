@@ -540,8 +540,9 @@ impl Kind {
         }
 
         let Some(global_name) = self.global_name() else {
-            eprintln!("empty global name: {}", code);
-            return Err(anyhow::anyhow!("global_name missing"));
+            // publicizing was not performed (e.g. C2RUST_REMOVE_STATIC is
+            // unset); return the original code as-is.
+            return Ok(code);
         };
 
         let (beg, end) = name_range(self.loc().unwrap(), self.range().unwrap());
