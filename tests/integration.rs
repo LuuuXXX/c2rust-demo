@@ -1,18 +1,8 @@
 //! Integration tests for `c2rust-demo init`.
 //!
-//! These tests exercise the full `init` flow using a minimal C fixture project.
-//! They require the following tools to be installed:
-//!   - `gcc`
-//!   - `make`
-//!   - `clang`
-//!   - `bindgen`
-//!
-//! Tests that require the full toolchain are gated behind the
-//! `C2RUST_INTEGRATION_TEST` environment variable.  Set it to `1` to run them:
-//!
-//! ```
-//! C2RUST_INTEGRATION_TEST=1 cargo test --test integration
-//! ```
+//! Tests that require external tools (gcc, make, clang, bindgen) automatically
+//! detect whether those tools are present and print a clear skip message when
+//! they are not.  No environment variable gate is needed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,13 +14,7 @@ fn fixture_dir() -> PathBuf {
         .join("simple")
 }
 
-fn integration_enabled() -> bool {
-    std::env::var("C2RUST_INTEGRATION_TEST").as_deref() == Ok("1")
-}
-
-/// Build the hook library and return its path.
-///
-/// The binary must already be compiled (`cargo build`) for this to work.
+/// Build the hook library and return its path, or `None` on failure.
 fn build_hook_for_tests() -> Option<PathBuf> {
     let hook_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hook");
     if !hook_dir.join("Makefile").exists() {
@@ -48,15 +32,18 @@ fn build_hook_for_tests() -> Option<PathBuf> {
     if so.exists() { Some(so) } else { None }
 }
 
-/// Verify build toolchain availability.
-fn toolchain_available() -> bool {
-    let tools = ["gcc", "make", "clang", "bindgen"];
-    tools.iter().all(|t| {
-        Command::new("which")
-            .arg(t)
-            .status()
-            .map_or(false, |s| s.success())
-    })
+/// Returns a list of tools that are missing from the PATH.
+fn missing_tools(tools: &[&str]) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|t| {
+            !Command::new("which")
+                .arg(t)
+                .status()
+                .map_or(false, |s| s.success())
+        })
+        .map(|t| t.to_string())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -83,37 +70,32 @@ fn cli_init_parses_default_feature() {
 /// Runs the build capture phase and verifies that `.c2rust` files are generated.
 #[test]
 fn build_capture_generates_c2rust_files() {
-    if !integration_enabled() {
-        eprintln!("Skipping build_capture test (set C2RUST_INTEGRATION_TEST=1 to enable)");
-        return;
-    }
-    if !toolchain_available() {
-        eprintln!("Skipping: required toolchain not available");
+    let missing = missing_tools(&["gcc", "make"]);
+    if !missing.is_empty() {
+        eprintln!("Skipping build_capture: missing tools: {}", missing.join(", "));
         return;
     }
 
     let Some(hook_so) = build_hook_for_tests() else {
-        eprintln!("Skipping: failed to build libhook.so");
+        eprintln!("Skipping build_capture: failed to build libhook.so");
         return;
     };
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let project_root = tmp.path();
-    let feature_root = project_root.join(".c2rust/default");
+    let fixture = fixture_dir();
+    // C2RUST_PROJECT_ROOT must be an ancestor of the C files being compiled.
+    // We use the fixture directory itself as the project root so the hook
+    // can strip its prefix from the absolute paths of .c files.
+    let project_root = fixture.clone();
+    let feature_root = tmp.path().join(".c2rust/default");
     let c_dir = feature_root.join("c");
     std::fs::create_dir_all(&c_dir).unwrap();
 
-    let fixture = fixture_dir();
-
-    let status = Command::new("make")
+    // Clean + build with the hook injected
+    let _ = Command::new("make")
         .current_dir(&fixture)
-        .env("LD_PRELOAD", &hook_so)
-        .env("C2RUST_PROJECT_ROOT", project_root)
-        .env("C2RUST_FEATURE_ROOT", &feature_root)
         .arg("clean")
-        .status()
-        .expect("make clean");
-    assert!(status.success());
+        .status();
 
     let status = Command::new("make")
         .current_dir(&fixture)
@@ -122,7 +104,7 @@ fn build_capture_generates_c2rust_files() {
         .env("C2RUST_FEATURE_ROOT", &feature_root)
         .status()
         .expect("make");
-    assert!(status.success());
+    assert!(status.success(), "make failed");
 
     // At least one .c2rust file should have been captured
     let c2rust_files = collect_c2rust_files(&c_dir);
@@ -139,14 +121,14 @@ fn build_capture_generates_c2rust_files() {
 // ---------------------------------------------------------------------------
 
 /// Runs the full `c2rust-demo init` command and verifies the output structure.
+///
+/// Because the test process has no TTY, `InteractiveSelector` automatically
+/// selects all captured files without prompting.
 #[test]
 fn full_init_creates_rust_project() {
-    if !integration_enabled() {
-        eprintln!("Skipping full_init test (set C2RUST_INTEGRATION_TEST=1 to enable)");
-        return;
-    }
-    if !toolchain_available() {
-        eprintln!("Skipping: required toolchain not available");
+    let missing = missing_tools(&["gcc", "make", "clang", "bindgen"]);
+    if !missing.is_empty() {
+        eprintln!("Skipping full_init: missing tools: {}", missing.join(", "));
         return;
     }
 
@@ -164,7 +146,6 @@ fn full_init_creates_rust_project() {
         .current_dir(project_root)
         .args([
             "init",
-            "--no-interactive",
             "--",
             "make",
             &format!("-C{}", fixture.display()),
@@ -175,26 +156,24 @@ fn full_init_creates_rust_project() {
     // The full init might fail if some optional tools are missing; we only
     // assert structural outputs if it succeeded.
     if !status.success() {
-        eprintln!("c2rust-demo init failed (may need bindgen/clang) – checking partial output");
+        eprintln!("c2rust-demo init failed – checking partial output");
     }
 
     let feature_root = project_root.join(".c2rust/default");
     let meta_dir = feature_root.join("meta");
     let c_dir = feature_root.join("c");
 
-    // These should always be created (before bindgen step)
+    // These should always be created (before the bindgen step)
     assert!(meta_dir.exists(), "meta/ not created");
     assert!(
         meta_dir.join("build_cmd.txt").exists(),
         "build_cmd.txt not written"
     );
 
-    let cmd_content =
-        std::fs::read_to_string(meta_dir.join("build_cmd.txt")).unwrap();
+    let cmd_content = std::fs::read_to_string(meta_dir.join("build_cmd.txt")).unwrap();
     assert!(cmd_content.contains("make"), "build_cmd.txt content: {cmd_content}");
 
     if c_dir.exists() && !collect_c2rust_files(&c_dir).is_empty() {
-        // selected_files.json should exist
         assert!(
             meta_dir.join("selected_files.json").exists(),
             "selected_files.json not written"
@@ -204,14 +183,8 @@ fn full_init_creates_rust_project() {
     if status.success() {
         let rust_dir = feature_root.join("rust");
         assert!(rust_dir.exists(), "rust/ not created");
-        assert!(
-            rust_dir.join("Cargo.toml").exists(),
-            "rust/Cargo.toml not found"
-        );
-        assert!(
-            rust_dir.join("src/lib.rs").exists(),
-            "rust/src/lib.rs not found"
-        );
+        assert!(rust_dir.join("Cargo.toml").exists(), "rust/Cargo.toml not found");
+        assert!(rust_dir.join("src/lib.rs").exists(), "rust/src/lib.rs not found");
         assert!(
             rust_dir.join("src/lib.normalized").exists(),
             "rust/src/lib.normalized not found"
@@ -285,7 +258,7 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
             let p = entry.path();
             if p.is_dir() {
                 collect_recursive(&p, out);
-            } else if p.extension().map_or(false, |e| e == "c2rust") {
+            } else if p.extension().is_some_and(|e| e == "c2rust") {
                 out.push(p);
             }
         }
@@ -297,15 +270,13 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 // ---------------------------------------------------------------------------
 
 mod c2rust_demo_layout {
-    // We reference the internal crate via a path hack – use the binary's
-    // compiled-in layout functions exposed as public items.
     pub use ::std::path::PathBuf;
-    use ::std::path::Path;
 
     pub struct FeatureLayout {
         pub c_dir: PathBuf,
         pub rust_dir: PathBuf,
         pub meta_dir: PathBuf,
+        #[allow(dead_code)]
         feature_root: PathBuf,
     }
 

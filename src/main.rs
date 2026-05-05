@@ -6,9 +6,7 @@ mod split;
 
 use crate::error::Result;
 use clap::{Args, Parser, Subcommand};
-use selector::{FileSelector, InteractiveSelector, SelectAll};
-
-// Re-export for tests
+use selector::{FileSelector, InteractiveSelector};
 
 #[derive(Parser)]
 #[command(name = "c2rust-demo")]
@@ -30,10 +28,6 @@ struct InitArgs {
     /// Feature name (default: "default")
     #[arg(long, default_value = "default")]
     feature: String,
-
-    /// Skip interactive file selection – include all captured files
-    #[arg(long)]
-    no_interactive: bool,
 
     /// Build command to execute (use after '--')
     /// Example: c2rust-demo init -- make -j4
@@ -90,13 +84,10 @@ fn run_init(args: InitArgs) -> Result<()> {
     }
 
     // ----------------------------------------------------------------
-    // Step 4: interactive (or automatic) file selection
+    // Step 4: interactive file selection
+    // (auto-selects all when stdin is not a terminal)
     // ----------------------------------------------------------------
-    let sel: Box<dyn FileSelector> = if args.no_interactive {
-        Box::new(SelectAll)
-    } else {
-        Box::new(InteractiveSelector)
-    };
+    let sel = InteractiveSelector;
     let selected = sel.select(&captured)?;
     println!("{} file(s) selected for this feature", selected.len());
 
@@ -160,22 +151,6 @@ mod tests {
                 .unwrap();
         let Commands::Init(init) = args.command;
         assert_eq!(init.feature, "myfeature");
-    }
-
-    #[test]
-    fn init_no_interactive_flag() {
-        let args = Cli::try_parse_from([
-            "c2rust-demo",
-            "init",
-            "--no-interactive",
-            "--",
-            "make",
-            "-j4",
-        ])
-        .unwrap();
-        let Commands::Init(init) = args.command;
-        assert!(init.no_interactive);
-        assert_eq!(init.build_cmd, vec!["make", "-j4"]);
     }
 
     #[test]

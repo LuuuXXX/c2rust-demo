@@ -66,12 +66,6 @@ c2rust-demo init -- make
 c2rust-demo init --feature foo -- make -j4
 ```
 
-### Skip interactive file selection
-
-```bash
-c2rust-demo init --no-interactive -- make
-```
-
 ### Pass arguments through `--`
 
 Everything after `--` is treated as the build command:
@@ -121,12 +115,7 @@ Select files to include in this feature (space to toggle, enter to confirm)
 - Use **space** to toggle individual files.
 - Press **Enter** to confirm.
 - Files that are **not** selected are recorded but excluded from the Rust scaffolding step.
-
-To disable the prompt and include all captured files automatically:
-
-```bash
-c2rust-demo init --no-interactive -- make
-```
+- When stdin is not a terminal (CI, scripts, pipes) all files are selected automatically.
 
 ## Running tests
 
@@ -136,10 +125,11 @@ Unit tests (no toolchain required):
 cargo test
 ```
 
-Integration tests (require gcc, make, clang, bindgen):
+Integration tests auto-detect whether the required tools (gcc, make, clang, bindgen) are
+available and print a clear skip message if any are missing:
 
 ```bash
-C2RUST_INTEGRATION_TEST=1 cargo test --test integration
+cargo test --test integration
 ```
 
 ## Current limitations

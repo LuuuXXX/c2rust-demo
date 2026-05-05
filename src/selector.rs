@@ -9,6 +9,9 @@ pub trait FileSelector {
 }
 
 /// Interactive multi-select backed by `dialoguer`.
+///
+/// When stdin is not a terminal (CI, pipes, tests) this automatically selects
+/// all candidates so the workflow is never blocked waiting for user input.
 pub struct InteractiveSelector;
 
 impl FileSelector for InteractiveSelector {
@@ -16,6 +19,16 @@ impl FileSelector for InteractiveSelector {
         if candidates.is_empty() {
             println!("No .c2rust files found – nothing to select.");
             return Ok(vec![]);
+        }
+
+        // When stdin is not a terminal (CI/scripts) fall back to selecting all.
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            println!(
+                "Non-interactive terminal: selecting all {} file(s) automatically.",
+                candidates.len()
+            );
+            return Ok(candidates.to_vec());
         }
 
         use dialoguer::{theme::ColorfulTheme, MultiSelect};
@@ -36,8 +49,8 @@ impl FileSelector for InteractiveSelector {
     }
 }
 
-/// Selector that selects all candidates without user interaction.
-/// Used when `--no-interactive` flag is set and in tests.
+/// Selector that selects all candidates without user interaction.  Used in tests.
+#[allow(dead_code)]
 pub struct SelectAll;
 
 impl FileSelector for SelectAll {
@@ -46,7 +59,7 @@ impl FileSelector for SelectAll {
     }
 }
 
-/// Selector that selects no candidates. Used in tests.
+/// Selector that selects no candidates.  Used in tests.
 #[allow(dead_code)]
 pub struct SelectNone;
 
@@ -56,7 +69,7 @@ impl FileSelector for SelectNone {
     }
 }
 
-/// Selector backed by a predicate closure. Used in tests.
+/// Selector backed by a predicate closure.  Used in tests.
 #[allow(dead_code)]
 pub struct PredicateSelector<F>(pub F)
 where
