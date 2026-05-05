@@ -1,0 +1,3 @@
+/target/
+/hook/libhook.so
+Cargo.lock

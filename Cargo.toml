@@ -1,0 +1,34 @@
+[package]
+name = "c2rust-demo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Minimal C-to-Rust workflow tool: build capture + Rust scaffolding generation"
+license = "MIT"
+
+[[bin]]
+name = "c2rust-demo"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+clang-ast = "0.1.35"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+syn = { version = "2.0", features = ["full", "visit", "visit-mut", "extra-traits"] }
+quote = "1.0"
+toml_edit = "0.22"
+memmap2 = "0.9"
+regex = "1.10"
+walkdir = "2"
+prettyplease = "0.2"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+dialoguer = "0.11"
+md5 = "0.7"
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
