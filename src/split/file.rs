@@ -1077,6 +1077,11 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise tests that mutate `C2RUST_REMOVE_STATIC` so they cannot race
+    /// with each other.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn make_var(qual_type: &str) -> Node {
         Node {
@@ -1144,6 +1149,8 @@ mod tests {
 
     #[test]
     fn remove_static_enabled_respects_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         // The env var is not set in the normal test environment, so the
         // default should be disabled.
         std::env::remove_var("C2RUST_REMOVE_STATIC");
