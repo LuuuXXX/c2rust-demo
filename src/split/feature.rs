@@ -51,6 +51,27 @@ impl Feature {
         Ok(this)
     }
 
+    /// Create a lightweight Feature for the `merge` command.
+    ///
+    /// Does not load any `.c2rust` files – merge operates directly on the
+    /// `rust/src/` directory produced by `init`.
+    pub fn new_for_merge(project_root: &Path, name: &str) -> Result<Self> {
+        let root = project_root.join(".c2rust").join(name);
+        if !root.exists() {
+            return Err(anyhow!(
+                "feature '{}' not found at {}; run init first",
+                name,
+                root.display()
+            ));
+        }
+        Ok(Self {
+            root,
+            name: name.to_string(),
+            prefix: PathBuf::new(),
+            files: vec![],
+        })
+    }
+
     /// Create a Feature with a pre-filtered subset of `.c2rust` files.
     ///
     /// Only the files whose paths appear in `selected` are loaded.
