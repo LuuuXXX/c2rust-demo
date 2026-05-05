@@ -1,0 +1,121 @@
+# Validate c2rust-demo against DaveGamble/cJSON
+#
+# Purpose: This workflow exists *primarily for validation visibility*.
+#          It runs on every push/PR so we can see whether c2rust-demo
+#          (init + merge) actually works against a real-world C project
+#          (DaveGamble/cJSON).  It is intentionally not gated; we want
+#          a clear pass/fail signal in the Actions log.
+#
+# The workflow mirrors scripts/validate-cjson.sh and can be reproduced
+# locally by running that script.
+
+name: validate-cjson
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: Run c2rust-demo against cJSON
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Check out c2rust-demo
+      # ------------------------------------------------------------------
+      - name: Checkout c2rust-demo
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 2. System dependencies (gcc, clang, libclang-dev)
+      # ------------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc clang libclang-dev
+
+      # ------------------------------------------------------------------
+      # 3. Rust toolchain
+      # ------------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      # ------------------------------------------------------------------
+      # 4. Cache Cargo registry + build artifacts
+      # ------------------------------------------------------------------
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # ------------------------------------------------------------------
+      # 5. Install bindgen-cli (required by c2rust-demo init)
+      # ------------------------------------------------------------------
+      - name: Install bindgen-cli
+        run: cargo install bindgen-cli
+
+      # ------------------------------------------------------------------
+      # 6. Build c2rust-demo
+      # ------------------------------------------------------------------
+      - name: Build c2rust-demo
+        run: cargo build --release
+
+      # ------------------------------------------------------------------
+      # 7. Clone DaveGamble/cJSON
+      # ------------------------------------------------------------------
+      - name: Clone cJSON
+        run: git clone --depth=1 https://github.com/DaveGamble/cJSON.git /tmp/cjson
+
+      # ------------------------------------------------------------------
+      # 8. Run c2rust-demo init inside the cJSON repo
+      #    Compile cJSON.c directly with gcc so the LD_PRELOAD hook
+      #    intercepts the compilation and captures the preprocessed source.
+      # ------------------------------------------------------------------
+      - name: Run c2rust-demo init
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Running c2rust-demo init ==="
+          $GITHUB_WORKSPACE/target/release/c2rust-demo init -- gcc -c cJSON.c -I.
+
+      # ------------------------------------------------------------------
+      # 9. Run c2rust-demo merge
+      # ------------------------------------------------------------------
+      - name: Run c2rust-demo merge
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Running c2rust-demo merge ==="
+          $GITHUB_WORKSPACE/target/release/c2rust-demo merge
+
+      # ------------------------------------------------------------------
+      # 10. Print the generated output tree so it is visible in the log
+      # ------------------------------------------------------------------
+      - name: Show generated output tree
+        if: always()
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Generated .c2rust directory tree ==="
+          find .c2rust -type f | sort || echo "(no .c2rust output found)"
+          echo ""
+          echo "=== Contents of .c2rust/default/meta/ ==="
+          cat .c2rust/default/meta/build_cmd.txt      2>/dev/null || true
+          cat .c2rust/default/meta/selected_files.json 2>/dev/null || true
+
+      # ------------------------------------------------------------------
+      # 11. Upload the entire .c2rust/ tree as a build artifact
+      #     (available for download from the Actions run page)
+      # ------------------------------------------------------------------
+      - name: Upload .c2rust artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cjson-c2rust-output
+          path: /tmp/cjson/.c2rust/
+          if-no-files-found: warn
