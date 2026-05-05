@@ -68,9 +68,8 @@ fn run_merge(args: MergeArgs) -> Result<()> {
     println!("\nMerged output:");
     println!("  .c2rust/{}/", feature);
     println!("    └── rust/");
-    println!("        ├── src.1/      (original init output, preserved)");
-    println!("        ├── src.2/      (merged output)");
-    println!("        └── src -> src.2 (symlink)");
+    println!("        ├── src/        (original init output, untouched)");
+    println!("        └── src.2/      (merged output — one .rs per mod_xxx)");
 
     Ok(())
 }
