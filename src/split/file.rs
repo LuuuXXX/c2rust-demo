@@ -540,8 +540,9 @@ impl Kind {
         }
 
         let Some(global_name) = self.global_name() else {
-            eprintln!("empty global name: {}", code);
-            return Err(anyhow::anyhow!("global_name missing"));
+            // publicizing was not performed (e.g. C2RUST_REMOVE_STATIC is
+            // unset); return the original code as-is.
+            return Ok(code);
         };
 
         let (beg, end) = name_range(self.loc().unwrap(), self.range().unwrap());
@@ -773,7 +774,11 @@ impl File {
         ))?;
         Self::init_line_info(&mut node);
         Self::init_vars(&mut node);
-        Self::remove_static(root, path, node)
+        if remove_static_enabled() {
+            Self::remove_static(root, path, node)
+        } else {
+            Ok(node)
+        }
     }
 
     fn md5_file(path: &Path) -> Result<String> {
@@ -963,6 +968,16 @@ impl File {
                 continue;
             }
 
+            // Static/inline items that were not publicized have no global
+            // symbol and cannot be declared as `extern` in a header.  Skip
+            // them from header output entirely; they remain in the C source.
+            if is_header
+                && node.kind.global_name().is_none()
+                && (node.kind.is_static() || node.kind.is_inline())
+            {
+                continue;
+            }
+
             if is_header || node.kind.has_committed() {
                 if let Kind::FunctionDecl(_) = node.kind {
                     if let Some(pos) = code.find('{') {
@@ -1000,6 +1015,16 @@ impl File {
 /// Return the clang binary name, honouring `C2RUST_CLANG` env var.
 pub fn get_clang() -> String {
     std::env::var("C2RUST_CLANG").unwrap_or_else(|_| "clang".to_string())
+}
+
+/// Return whether the static/inline symbol publicizing step is enabled.
+///
+/// Disabled by default.  Set the `C2RUST_REMOVE_STATIC` environment variable
+/// to any non-empty value to enable it.
+pub fn remove_static_enabled() -> bool {
+    std::env::var("C2RUST_REMOVE_STATIC")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1088,11 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise tests that mutate `C2RUST_REMOVE_STATIC` so they cannot race
+    /// with each other.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn make_var(qual_type: &str) -> Node {
         Node {
@@ -1126,6 +1156,28 @@ mod tests {
             inner: vec![weak_attr],
         };
         assert!(fn_node.kind.is_weak_fn(&fn_node.inner));
+    }
+
+    #[test]
+    fn remove_static_enabled_respects_env_var() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // The env var is not set in the normal test environment, so the
+        // default should be disabled.
+        std::env::remove_var("C2RUST_REMOVE_STATIC");
+        assert!(!remove_static_enabled(), "should be disabled when env var is unset");
+
+        std::env::set_var("C2RUST_REMOVE_STATIC", "1");
+        assert!(remove_static_enabled(), "should be enabled when env var is '1'");
+
+        std::env::set_var("C2RUST_REMOVE_STATIC", "true");
+        assert!(remove_static_enabled(), "should be enabled when env var is 'true'");
+
+        std::env::set_var("C2RUST_REMOVE_STATIC", "");
+        assert!(!remove_static_enabled(), "should be disabled when env var is empty string");
+
+        // Clean up so other tests are not affected.
+        std::env::remove_var("C2RUST_REMOVE_STATIC");
     }
 
     #[test]
