@@ -8,7 +8,9 @@
 //! declarations, because the c2rust-demo init flow does NOT inject those
 //! declarations.
 //!
-//! The output is written to `rust/src.2/`; `rust/src` is **not** modified.
+//! The merged output is first written to `rust/src.2/`.  After a successful
+//! merge, the original `rust/src` is moved to `rust/src.1` (preserving the
+//! init output as a backup), and `rust/src` becomes a symlink to `rust/src.2`.
 
 use crate::error::{Result, ToError};
 use crate::split::feature::Feature;
@@ -28,8 +30,9 @@ impl Feature {
     /// Merge the init output under `.c2rust/<feature>/rust/src/` into
     /// `.c2rust/<feature>/rust/src.2/`.
     ///
-    /// `rust/src` is **not** modified; the merged output lives only in
-    /// `rust/src.2/`.
+    /// After a successful merge the original `rust/src` is moved to
+    /// `rust/src.1` (backup of the init output) and `rust/src` becomes a
+    /// symlink pointing to `rust/src.2`.
     pub fn merge(&self) -> Result<()> {
         println!("Starting merge for feature '{}'", self.name);
 
@@ -55,8 +58,40 @@ impl Feature {
         }
 
         self.deduplicate_into_lib_rs(&mod_names)?;
+        self.link_src()?;
 
         println!("Feature '{}' merged successfully", self.name);
+        Ok(())
+    }
+
+    /// After a successful merge, back up the original `rust/src` as
+    /// `rust/src.1` and make `rust/src` a symlink to `rust/src.2`.
+    ///
+    /// If `rust/src` is already a symlink (e.g. from a previous merge run),
+    /// the old symlink is simply removed; `rust/src.1` is left in place.
+    fn link_src(&self) -> Result<()> {
+        let src = self.root.join("rust/src");
+
+        if src.is_symlink() {
+            fs::remove_file(&src)
+                .ctx(&format!("remove symlink {}", src.display()))?;
+        } else {
+            let old_src = self.root.join("rust/src.1");
+            let _ = fs::remove_dir_all(&old_src);
+            fs::rename(&src, &old_src).ctx(&format!(
+                "rename {} -> {}",
+                src.display(),
+                old_src.display()
+            ))?;
+        }
+
+        let new_src = self.root.join("rust/src.2");
+        std::os::unix::fs::symlink(&new_src, &src).ctx(&format!(
+            "symlink {} -> {}",
+            src.display(),
+            new_src.display()
+        ))?;
+
         Ok(())
     }
 
@@ -622,7 +657,8 @@ mod tests {
     /// - `src.2/mod_foo.rs` is created
     /// - `src.2/lib.rs` is created
     /// - The merged module file contains expected FFI
-    /// - `rust/src` is NOT modified (not converted to symlink)
+    /// - `rust/src.1` preserves the original init output
+    /// - `rust/src` is a symlink to `rust/src.2`
     #[test]
     fn merge_produces_correct_output_structure() {
         let tmp = TempDir::new().unwrap();
@@ -689,11 +725,24 @@ mod mod_foo;
             "lib.rs should declare mod_foo module"
         );
 
-        // rust/src should still be a plain directory (not modified)
+        // rust/src.1 should preserve the original init output
+        let src1_path = feature_root.join("rust/src.1");
+        assert!(
+            src1_path.is_dir(),
+            "rust/src.1 should preserve the original init output"
+        );
+
+        // rust/src should be a symlink pointing to rust/src.2
         let src_path = feature_root.join("rust/src");
         assert!(
-            src_path.is_dir() && !src_path.is_symlink(),
-            "rust/src should remain a plain directory (not converted to symlink)"
+            src_path.is_symlink(),
+            "rust/src should become a symlink to rust/src.2"
+        );
+        let linked = fs::read_link(&src_path).unwrap();
+        assert_eq!(
+            linked,
+            feature_root.join("rust/src.2"),
+            "rust/src symlink should point to rust/src.2"
         );
     }
 
