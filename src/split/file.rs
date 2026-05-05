@@ -968,6 +968,16 @@ impl File {
                 continue;
             }
 
+            // Static/inline items that were not publicized have no global
+            // symbol and cannot be declared as `extern` in a header.  Skip
+            // them from header output entirely; they remain in the C source.
+            if is_header
+                && node.kind.global_name().is_none()
+                && (node.kind.is_static() || node.kind.is_inline())
+            {
+                continue;
+            }
+
             if is_header || node.kind.has_committed() {
                 if let Kind::FunctionDecl(_) = node.kind {
                     if let Some(pos) = code.find('{') {
