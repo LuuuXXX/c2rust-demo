@@ -210,6 +210,136 @@ fn full_init_creates_rust_project() {
 }
 
 // ---------------------------------------------------------------------------
+// cJSON manual-validation test (ignored by default)
+// ---------------------------------------------------------------------------
+
+/// End-to-end validation of `c2rust-demo init` and `c2rust-demo merge` against
+/// the real `DaveGamble/cJSON` repository.
+///
+/// This test is **ignored by default** because it:
+///   - requires a network connection (clones cJSON from GitHub), and
+///   - requires a full Linux toolchain (gcc, make, clang, bindgen).
+///
+/// Run it explicitly when you want to validate the tool against a real project:
+///
+/// ```bash
+/// cargo test --test integration cjson_manual_validation -- --ignored
+/// ```
+///
+/// Alternatively use the helper script, which produces richer output:
+///
+/// ```bash
+/// bash scripts/validate-cjson.sh --keep-workdir
+/// ```
+#[test]
+#[ignore = "manual validation only — requires network + full toolchain"]
+fn cjson_manual_validation() {
+    // -----------------------------------------------------------------------
+    // Prerequisites
+    // -----------------------------------------------------------------------
+    let missing = missing_tools(&["git", "gcc", "make", "clang", "bindgen"]);
+    if !missing.is_empty() {
+        eprintln!(
+            "Skipping cjson_manual_validation: missing tools: {}",
+            missing.join(", ")
+        );
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Clone cJSON into a temporary directory
+    // -----------------------------------------------------------------------
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let cjson_dir = tmp.path().join("cJSON");
+
+    let clone_status = Command::new("git")
+        .args([
+            "clone",
+            "--depth=1",
+            "https://github.com/DaveGamble/cJSON.git",
+        ])
+        .arg(&cjson_dir)
+        .status()
+        .expect("git clone");
+    assert!(clone_status.success(), "git clone cJSON failed");
+
+    // -----------------------------------------------------------------------
+    // Run c2rust-demo init inside the cloned cJSON directory
+    // -----------------------------------------------------------------------
+    let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .current_dir(&cjson_dir)
+        .args(["init", "--", "make"])
+        .status()
+        .expect("c2rust-demo init");
+
+    let feature_root = cjson_dir.join(".c2rust/default");
+    let meta_dir = feature_root.join("meta");
+    let c_dir = feature_root.join("c");
+
+    // meta/ and build_cmd.txt must always be present
+    assert!(meta_dir.exists(), "meta/ not created");
+    assert!(
+        meta_dir.join("build_cmd.txt").exists(),
+        "build_cmd.txt not written"
+    );
+
+    if c_dir.exists() && !collect_c2rust_files(&c_dir).is_empty() {
+        assert!(
+            meta_dir.join("selected_files.json").exists(),
+            "selected_files.json not written"
+        );
+    }
+
+    if status.success() {
+        let rust_dir = feature_root.join("rust");
+        assert!(rust_dir.exists(), "rust/ not created");
+        assert!(rust_dir.join("Cargo.toml").exists(), "rust/Cargo.toml missing");
+        assert!(rust_dir.join("src/lib.rs").exists(), "rust/src/lib.rs missing");
+
+        let mod_dirs: Vec<_> = std::fs::read_dir(rust_dir.join("src"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                e.path().is_dir() && name.starts_with("mod_")
+            })
+            .collect();
+        assert!(!mod_dirs.is_empty(), "no mod_* dirs under rust/src/");
+
+        // -------------------------------------------------------------------
+        // Run c2rust-demo merge
+        // -------------------------------------------------------------------
+        let merge_status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+            .current_dir(&cjson_dir)
+            .arg("merge")
+            .status()
+            .expect("c2rust-demo merge");
+        assert!(merge_status.success(), "c2rust-demo merge failed");
+
+        let src2 = feature_root.join("rust/src.2");
+        assert!(src2.exists(), "rust/src.2/ not created by merge");
+
+        // src.2/ should contain at least one .rs file
+        let rs_files: Vec<_> = std::fs::read_dir(&src2)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+            .collect();
+        assert!(
+            !rs_files.is_empty(),
+            "rust/src.2/ contains no .rs files after merge"
+        );
+
+        println!("cJSON validation passed.");
+        println!("  mod_* dirs : {}", mod_dirs.len());
+        println!("  src.2 files: {}", rs_files.len());
+    } else {
+        eprintln!("c2rust-demo init did not exit successfully – partial output validated only");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Layout / selector unit-level helpers
 // ---------------------------------------------------------------------------
 

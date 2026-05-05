@@ -132,6 +132,125 @@ available and print a clear skip message if any are missing:
 cargo test --test integration
 ```
 
+## Manual validation with cJSON
+
+> **Note:** This section is for manual validation only. These steps are **not** part of the
+> normal CI test suite and will not run automatically.
+
+The helper script `scripts/validate-cjson.sh` exercises `c2rust-demo init` and
+`c2rust-demo merge` against the real-world [`DaveGamble/cJSON`](https://github.com/DaveGamble/cJSON)
+project. It clones the repository, runs both commands, and prints the resulting output
+structure along with pass/fail indicators for each expected artifact.
+
+### Prerequisites
+
+| Tool | Notes |
+|------|-------|
+| Linux | LD_PRELOAD hook required |
+| git | For cloning cJSON |
+| Rust / cargo ≥ 1.82 | Build c2rust-demo |
+| gcc | Build libhook.so |
+| make | Run the cJSON build |
+| clang | AST dump |
+| bindgen | `cargo install bindgen-cli` |
+
+### Running the script
+
+```bash
+# Quick run (cleans up automatically)
+bash scripts/validate-cjson.sh
+
+# Keep the working directory for inspection
+bash scripts/validate-cjson.sh --keep-workdir
+```
+
+### Expected terminal output
+
+```
+[INFO]  Checking prerequisites...
+[OK]    All required tools are present.
+[INFO]  Building c2rust-demo (cargo build --release)...
+[OK]    Binary built at .../target/release/c2rust-demo
+[INFO]  Working directory: /tmp/c2rust-demo-cjson-XXXXXX
+[INFO]  Cloning DaveGamble/cJSON into .../cJSON...
+[OK]    cJSON cloned.
+[INFO]  Running: c2rust-demo init -- make
+------------------------------------------------------------
+=== c2rust-demo init ===
+Project root : .../cJSON
+Feature      : default
+Build command: make
+
+Captured N .c2rust file(s)
+N file(s) selected for this feature
+
+Running init split...
+...
+✓ c2rust-demo init completed successfully!
+------------------------------------------------------------
+[OK]    c2rust-demo init completed.
+[OK]    c/          directory exists
+[OK]    meta/       directory exists
+[OK]    meta/build_cmd.txt exists
+[OK]    meta/selected_files.json exists
+[OK]    rust/       directory exists
+[OK]    rust/Cargo.toml exists
+[OK]    rust/src/lib.rs exists
+[OK]    Found N mod_* director(ies) under rust/src/
+[INFO]  Running: c2rust-demo merge
+------------------------------------------------------------
+=== c2rust-demo merge ===
+...
+✓ c2rust-demo merge completed successfully!
+------------------------------------------------------------
+[OK]    c2rust-demo merge completed.
+==============================
+  Validation complete
+==============================
+```
+
+### Expected output structure after `init`
+
+```
+.c2rust/default/
+├── c/
+│   └── cJSON.c2rust          (preprocessed C source captured by the hook)
+├── meta/
+│   ├── build_cmd.txt         (contains "make")
+│   └── selected_files.json   (list of selected .c2rust files)
+└── rust/
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs
+        ├── lib.normalized
+        └── mod_cjson/        (one directory per captured C file)
+            ├── mod.rs
+            ├── mod.normalized
+            ├── fun_cJSON_Parse.rs
+            ├── fun_cJSON_Parse.c
+            ├── decl_cJSON_Parse.rs
+            └── ...
+```
+
+### Expected output structure after `merge`
+
+```
+.c2rust/default/rust/
+├── src/            (original init output — untouched)
+└── src.2/          (merged output — one .rs per mod_xxx)
+    ├── lib.rs
+    └── mod_cjson.rs
+```
+
+### Running as an ignored integration test
+
+An `#[ignore]` test is also available for opt-in use in automated pipelines
+that have the full toolchain and network access:
+
+```bash
+cargo test --test integration cjson_manual_validation -- --ignored
+```
+
 ## Current limitations
 
 - **Linux only** – relies on `LD_PRELOAD`.
