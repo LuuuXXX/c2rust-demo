@@ -773,7 +773,11 @@ impl File {
         ))?;
         Self::init_line_info(&mut node);
         Self::init_vars(&mut node);
-        Self::remove_static(root, path, node)
+        if remove_static_enabled() {
+            Self::remove_static(root, path, node)
+        } else {
+            Ok(node)
+        }
     }
 
     fn md5_file(path: &Path) -> Result<String> {
@@ -1002,6 +1006,16 @@ pub fn get_clang() -> String {
     std::env::var("C2RUST_CLANG").unwrap_or_else(|_| "clang".to_string())
 }
 
+/// Return whether the static/inline symbol publicizing step is enabled.
+///
+/// Disabled by default.  Set the `C2RUST_REMOVE_STATIC` environment variable
+/// to any non-empty value to enable it.
+pub fn remove_static_enabled() -> bool {
+    std::env::var("C2RUST_REMOVE_STATIC")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -1126,6 +1140,26 @@ mod tests {
             inner: vec![weak_attr],
         };
         assert!(fn_node.kind.is_weak_fn(&fn_node.inner));
+    }
+
+    #[test]
+    fn remove_static_enabled_respects_env_var() {
+        // The env var is not set in the normal test environment, so the
+        // default should be disabled.
+        std::env::remove_var("C2RUST_REMOVE_STATIC");
+        assert!(!remove_static_enabled(), "should be disabled when env var is unset");
+
+        std::env::set_var("C2RUST_REMOVE_STATIC", "1");
+        assert!(remove_static_enabled(), "should be enabled when env var is '1'");
+
+        std::env::set_var("C2RUST_REMOVE_STATIC", "true");
+        assert!(remove_static_enabled(), "should be enabled when env var is 'true'");
+
+        std::env::set_var("C2RUST_REMOVE_STATIC", "");
+        assert!(!remove_static_enabled(), "should be disabled when env var is empty string");
+
+        // Clean up so other tests are not affected.
+        std::env::remove_var("C2RUST_REMOVE_STATIC");
     }
 
     #[test]
