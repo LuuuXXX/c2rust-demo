@@ -609,6 +609,7 @@ impl Feature {
         }
 
         dep_types.sort_by(|a, b| a.name().cmp(&b.name()));
+        // Intentionally descending – mirrors original c2rust-code-analyse behavior.
         dep_ffi.sort_by(|a, b| Self::foreign_item_name(b).cmp(&Self::foreign_item_name(a)));
     }
 
@@ -935,6 +936,11 @@ impl Feature {
     }
 
     /// Replace `rust/src` symlink/directory with a symlink to `rust/src.2`.
+    ///
+    /// # Platform note
+    /// Uses `std::os::unix::fs::symlink`, which is Unix-only.  This is
+    /// consistent with the rest of the tool (which relies on `LD_PRELOAD`
+    /// for build capture) and is not expected to run on Windows.
     fn link_src(&self) -> Result<()> {
         let src = self.root.join("rust/src");
         if src.is_symlink() {
