@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 #define MAX_PATH_LEN 8192
 #define MAX_CMD_LEN 16384
@@ -46,9 +47,26 @@ static const char* path_basename(const char* path) {
         return slash ? slash + 1 : path;
 }
 
+/*
+ * Return 1 if 'name' matches 'pattern' exactly or as a versioned variant.
+ * Versioned matching allows names like "gcc-13" or "clang-15" to be
+ * recognised when the pattern is "gcc" or "clang" respectively.
+ * Only numeric version suffixes (e.g. gcc-13, clang-15) are accepted to
+ * avoid false-positives like gcc-wrapper or gcc-tools.
+ */
+static inline int is_name_match(const char* name, const char* pattern) {
+        size_t plen = strlen(pattern);
+        if (strncmp(name, pattern, plen) != 0) return 0;
+        /* exact match */
+        if (name[plen] == '\0') return 1;
+        /* versioned variant: gcc-13, clang-15, etc. (digit after hyphen) */
+        if (name[plen] == '-' && isdigit((unsigned char)name[plen + 1])) return 1;
+        return 0;
+}
+
 static inline int is_matched(const char* name, const char** names, int len) {
         for (int i = 0; i < len; ++i) {
-                if (strcmp(name, names[i]) == 0) {
+                if (is_name_match(name, names[i])) {
                         return 1;
                 }
         }
@@ -58,30 +76,42 @@ static inline int is_matched(const char* name, const char** names, int len) {
 /*
  * Match the basename of name against the known compiler list or the value of
  * C2RUST_CC.  Using basename allows invocations like /usr/bin/gcc to be
- * recognised without extra configuration.
+ * recognised without extra configuration.  Versioned names like gcc-13 are
+ * also recognised when no explicit C2RUST_CC override is set.
  */
 static inline int is_compiler(const char* name) {
         const char* cc = getenv(C2RUST_CC);
         const char* base = path_basename(name);
         if (!base) return 0;
         if (!cc) {
-                return is_matched(base, cc_names, sizeof(cc_names) / sizeof(cc_names[0]));
+                int n = (int)(sizeof(cc_names) / sizeof(cc_names[0]));
+                int r = is_matched(base, cc_names, n);
+                DBG("is_compiler: base='%s' list-match=%d (checked %d names)\n", base, r, n);
+                return r;
         } else {
-                return strcmp(path_basename(cc), base) == 0;
+                int r = strcmp(path_basename(cc), base) == 0;
+                DBG("is_compiler: base='%s' env-match=%d (C2RUST_CC='%s')\n", base, r, cc);
+                return r;
         }
 }
 
 /*
- * Same basename-aware matching for linker names.
+ * Same basename-aware matching for linker names.  Versioned variants like
+ * ld.lld-15 are also recognised.
  */
 static inline int is_linker(const char* name) {
         const char* ld = getenv(C2RUST_LD);
         const char* base = path_basename(name);
         if (!base) return 0;
         if (!ld) {
-                return is_matched(base, ld_names, sizeof(ld_names) / sizeof(ld_names[0]));
+                int n = (int)(sizeof(ld_names) / sizeof(ld_names[0]));
+                int r = is_matched(base, ld_names, n);
+                DBG("is_linker: base='%s' list-match=%d (checked %d names)\n", base, r, n);
+                return r;
         } else {
-                return strcmp(path_basename(ld), base) == 0;
+                int r = strcmp(path_basename(ld), base) == 0;
+                DBG("is_linker: base='%s' env-match=%d (C2RUST_LD='%s')\n", base, r, ld);
+                return r;
         }
 }
 
