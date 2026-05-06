@@ -163,6 +163,9 @@ static inline int is_cfile(const char* file) {
 
 // 提取-I, -D, -U, -include参数, 和工程目录下的C文件.
 // 输入保证extracted, cfiles最少可以保存argc个输入参数.
+// NOTE: extracted[] entries are pointers into argv – they are NOT separately
+// heap-allocated and must NOT be individually freed by the caller.
+// cfiles[] entries ARE heap-allocated by realpath() and must be freed.
 static int parse_args(int argc, char* argv[], char* extracted[], char* cfiles[]) {
     int cnt = 0;
     for (int i = 1; i < argc; ++i) {
@@ -448,7 +451,7 @@ __attribute__((constructor)) static void c2rust_hook(void) {
         }
 
         argc = read_proc_cmdline(&argv);
-        if (argc < 1 || !argv || !argv[0]) {
+        if (argc < 1) {
                 DBG("failed to read /proc/self/cmdline\n");
                 goto fail;
         }
