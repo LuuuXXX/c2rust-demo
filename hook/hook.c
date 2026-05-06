@@ -125,13 +125,23 @@ static int read_proc_cmdline(char*** out_argv) {
         if (argc == 0) return -1;
 
         char** argv = malloc((size_t)(argc + 1) * sizeof(char*));
-        if (!argv) return -1;
+        if (!argv) {
+                DBG("malloc failed for argv (%d entries)\n", argc);
+                return -1;
+        }
 
         int idx = 0;
         char* p = buf;
         char* end = buf + n;
         while (idx < argc && p < end) {
-                argv[idx++] = strdup(p);
+                char* s = strdup(p);
+                if (!s) {
+                        DBG("strdup failed at arg %d\n", idx);
+                        for (int i = 0; i < idx; i++) free(argv[i]);
+                        free(argv);
+                        return -1;
+                }
+                argv[idx++] = s;
                 p += strlen(p) + 1;
         }
         argv[idx] = NULL;
@@ -284,7 +294,10 @@ static void discover_cfile(int argc, char* argv[], const char* project_root, con
 
         char** cflags = calloc((size_t)argc, sizeof(char*)); // 保存-I, -D, -U, -include
         char** cfiles = calloc((size_t)argc, sizeof(char*)); // 保存当前编译的C文件.
-        if (!cflags || !cfiles) goto fail;
+        if (!cflags || !cfiles) {
+                DBG("calloc failed for cflags/cfiles\n");
+                goto fail;
+        }
 
         if (getenv(C2RUST_CC_SKIP)) goto fail;
 
@@ -306,7 +319,7 @@ fail:
                 for (char** cf = cfiles; *cf; ++cf) free(*cf);
                 free(cfiles);
         }
-        free(cflags);
+        if (cflags) free(cflags);
 }
 
 // 提取生成的全部动态库和可执行程序的名字，以及生成过程中链接的C2RUST_PROJECT_ROOT目录下的静态库.
