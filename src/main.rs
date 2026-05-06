@@ -67,6 +67,8 @@ fn run_merge(args: MergeArgs) -> Result<()> {
     println!("\n✓ c2rust-demo merge completed successfully!");
     println!("\nMerged output:");
     println!("  .c2rust/{}/", feature);
+    println!("    ├── meta/");
+    println!("    │   └── merge-interface-report.md  (interface checklist)");
     println!("    └── rust/");
     println!("        ├── src.1/      (original init output backup)");
     println!("        ├── src/        (symlink → src.2)");
@@ -144,7 +146,7 @@ fn run_init(args: InitArgs) -> Result<()> {
     println!("\nOutput structure:");
     println!("  .c2rust/{}/", feature);
     println!("    ├── c/          (captured .c2rust files)");
-    println!("    ├── meta/       (build_cmd.txt, selected_files.json)");
+    println!("    ├── meta/       (build_cmd.txt, selected_files.json, init-interface-report.md)");
     println!("    └── rust/       (generated Rust project)");
 
     Ok(())
