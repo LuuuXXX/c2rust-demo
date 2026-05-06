@@ -23,6 +23,24 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 // ---------------------------------------------------------------------------
+// Report data structures
+// ---------------------------------------------------------------------------
+
+/// Per-module summary collected during merge, used to write the merge report.
+pub(crate) struct MergeModSummary {
+    mod_name: String,
+    /// Names of Rust functions (derived from `fun_*.rs` symbol files).
+    fn_names: Vec<String>,
+    /// Names of Rust variables/statics (derived from `var_*.rs` symbol files).
+    var_names: Vec<String>,
+    /// FFI item names still local to this module after deduplication.
+    /// Populated after `deduplicate_into_lib_rs` removes shared items.
+    ffi_names: Vec<String>,
+    /// Source files that contributed to the merged module.
+    source_files: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // impl Feature – merge methods
 // ---------------------------------------------------------------------------
 
@@ -53,12 +71,24 @@ impl Feature {
             return Ok(());
         }
 
+        let mut mod_summaries: Vec<MergeModSummary> = Vec::new();
         for mod_name in &mod_names {
-            self.merge_mod_dir(mod_name)?;
+            if let Some(summary) = self.merge_mod_dir(mod_name)? {
+                mod_summaries.push(summary);
+            }
         }
 
-        self.deduplicate_into_lib_rs(&mod_names)?;
+        let shared_ffi_names = self.deduplicate_into_lib_rs(&mod_names)?;
+
+        // Remove shared FFI from each module's local FFI list
+        let shared_ffi_set: HashSet<&str> =
+            shared_ffi_names.iter().map(String::as_str).collect();
+        for summary in &mut mod_summaries {
+            summary.ffi_names.retain(|n| !shared_ffi_set.contains(n.as_str()));
+        }
+
         self.link_src()?;
+        self.write_merge_report(&mod_summaries, &shared_ffi_names)?;
 
         println!("Feature '{}' merged successfully", self.name);
         Ok(())
@@ -175,12 +205,12 @@ impl Feature {
     /// - `use super::*;`
     /// - All items from `mod.rs` (types, FFI declarations)
     /// - All items from each `fun_*.rs` / `var_*.rs` symbol file
-    fn merge_mod_dir(&self, mod_name: &str) -> Result<bool> {
+    fn merge_mod_dir(&self, mod_name: &str) -> Result<Option<MergeModSummary>> {
         let src_dir = self.root.join("rust/src");
         let mod_dir = src_dir.join(mod_name);
 
         if !mod_dir.exists() {
-            return Ok(false);
+            return Ok(None);
         }
 
         println!("Processing mod for merge: {}", mod_name);
@@ -224,6 +254,19 @@ impl Feature {
             Self::collect_symbol_items(&rs_file, &mut merged_items)?;
         }
 
+        // Collect FFI names from merged items (before deduplication)
+        let mut ffi_names: Vec<String> = Vec::new();
+        for item in &merged_items {
+            if let syn::Item::ForeignMod(fm) = item {
+                for ffi_item in &fm.items {
+                    let name = Self::ffi_name(ffi_item);
+                    if !name.is_empty() {
+                        ffi_names.push(name);
+                    }
+                }
+            }
+        }
+
         let merged_file = syn::File {
             shebang: None,
             attrs: Vec::new(),
@@ -238,7 +281,28 @@ impl Feature {
             .ctx(&format!("write {}", merged_rs.display()))?;
 
         println!("File merged successfully: {}", merged_rs.display());
-        Ok(true)
+
+        // Build the summary for the report
+        let fn_names: Vec<String> = module_names
+            .iter()
+            .filter(|n| n.starts_with("fun_"))
+            .map(|n| n[4..].to_string())
+            .collect();
+        let var_names: Vec<String> = module_names
+            .iter()
+            .filter(|n| n.starts_with("var_"))
+            .map(|n| n[4..].to_string())
+            .collect();
+        let mut source_files = vec!["mod.rs".to_string()];
+        source_files.extend(module_names.iter().map(|n| format!("{n}.rs")));
+
+        Ok(Some(MergeModSummary {
+            mod_name: mod_name.to_string(),
+            fn_names,
+            var_names,
+            ffi_names,
+            source_files,
+        }))
     }
 
     /// Read all items from a symbol file (`fun_*.rs` / `var_*.rs`) and
@@ -270,15 +334,17 @@ impl Feature {
     /// Collect FFI declarations from all merged `mod_xxx.rs` files,
     /// extract any that appear in more than one file into `src.2/lib.rs`,
     /// and remove them from the individual module files.
-    fn deduplicate_into_lib_rs(&self, mod_names: &[String]) -> Result<()> {
+    ///
+    /// Returns the names of FFI items that were extracted (shared across modules).
+    fn deduplicate_into_lib_rs(&self, mod_names: &[String]) -> Result<Vec<String>> {
         let src_2 = self.root.join("rust/src.2");
         if !src_2.exists() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let mod_files = Self::collect_mod_files(&src_2)?;
         if mod_files.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // Collect all FFI items across mod files
@@ -322,7 +388,10 @@ impl Feature {
             "Deduplicated {} FFI declaration(s) to lib.rs",
             ffi_remove_set.len()
         );
-        Ok(())
+
+        let mut shared: Vec<String> = ffi_remove_set.into_iter().collect();
+        shared.sort();
+        Ok(shared)
     }
 
     /// Collect all mod_*.rs files from a directory.
@@ -539,6 +608,112 @@ impl Feature {
             return false;
         }
         matches!(ffi_seg.tree.as_ref(), syn::UseTree::Glob(_))
+    }
+
+    // -----------------------------------------------------------------------
+    // Report generation
+    // -----------------------------------------------------------------------
+
+    /// Write `.c2rust/<feature>/meta/merge-interface-report.md`.
+    ///
+    /// This is the primary user-facing artifact produced by `merge`.  It
+    /// summarises the final merged layout: shared FFI hoisted to `lib.rs`,
+    /// per-module functions, variables, local FFI, and source files.
+    pub(crate) fn write_merge_report(
+        &self,
+        mod_summaries: &[MergeModSummary],
+        shared_ffi_names: &[String],
+    ) -> Result<()> {
+        let meta_dir = self.root.join("meta");
+        fs::create_dir_all(&meta_dir).ctx(&format!("create {}", meta_dir.display()))?;
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# Merge Interface Report — feature `{}`\n\n",
+            self.name
+        ));
+        out.push_str(
+            "Generated by **c2rust-demo merge**.  \
+             This is the primary interface checklist for the final merged output.\n\n---\n\n",
+        );
+
+        // Summary table
+        let total_fns: usize = mod_summaries.iter().map(|s| s.fn_names.len()).sum();
+        let total_vars: usize = mod_summaries.iter().map(|s| s.var_names.len()).sum();
+        let total_local_ffi: usize = mod_summaries.iter().map(|s| s.ffi_names.len()).sum();
+        out.push_str("## Summary\n\n");
+        out.push_str(&format!(
+            "| Item | Count |\n|------|-------|\n\
+             | Merged modules | {} |\n\
+             | Total functions | {} |\n\
+             | Total variables | {} |\n\
+             | Module-local FFI items | {} |\n\
+             | Shared FFI moved to `lib.rs` | {} |\n\n---\n",
+            mod_summaries.len(),
+            total_fns,
+            total_vars,
+            total_local_ffi,
+            shared_ffi_names.len(),
+        ));
+
+        // Shared FFI section
+        out.push_str("\n## `lib.rs` — Shared FFI\n\n");
+        if shared_ffi_names.is_empty() {
+            out.push_str("*(no shared FFI; all declarations are module-local)*\n");
+        } else {
+            out.push_str("The following FFI declarations appeared in more than one module and were deduplicated into `lib.rs`:\n\n");
+            for name in shared_ffi_names {
+                out.push_str(&format!("- `{name}`\n"));
+            }
+        }
+        out.push_str("\n---\n");
+
+        // Per-module sections
+        for summary in mod_summaries {
+            out.push_str(&format!("\n## {}\n\n", summary.mod_name));
+
+            out.push_str("### Final Rust functions\n\n");
+            if summary.fn_names.is_empty() {
+                out.push_str("*(none)*\n");
+            } else {
+                for name in &summary.fn_names {
+                    out.push_str(&format!("- `{name}`\n"));
+                }
+            }
+
+            out.push_str("\n### Final Rust variables\n\n");
+            if summary.var_names.is_empty() {
+                out.push_str("*(none)*\n");
+            } else {
+                for name in &summary.var_names {
+                    out.push_str(&format!("- `{name}`\n"));
+                }
+            }
+
+            out.push_str("\n### Module-local FFI\n\n");
+            if summary.ffi_names.is_empty() {
+                out.push_str("*(none)*\n");
+            } else {
+                for name in &summary.ffi_names {
+                    out.push_str(&format!("- `{name}`\n"));
+                }
+            }
+
+            out.push_str("\n### Source files merged\n\n");
+            for src_file in &summary.source_files {
+                out.push_str(&format!("- `{}/{}`\n", summary.mod_name, src_file));
+            }
+            out.push('\n');
+        }
+
+        let report_path = meta_dir.join("merge-interface-report.md");
+        fs::write(&report_path, out.as_bytes())
+            .ctx(&format!("write {}", report_path.display()))?;
+        println!(
+            "Merge interface report: {}",
+            report_path.display()
+        );
+        Ok(())
     }
 }
 
@@ -896,5 +1071,213 @@ unsafe extern "C" {
             Feature::foreign_item_name(&item),
             Some("EXT_VAR".to_string())
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Merge report generation
+    // -----------------------------------------------------------------------
+
+    /// Verify that merge produces the merge interface report file.
+    #[test]
+    fn merge_produces_merge_interface_report() {
+        let tmp = TempDir::new().unwrap();
+        let feature_root = tmp.path().join(".c2rust/default");
+
+        let src = feature_root.join("rust/src");
+        let mod_dir = src.join("mod_foo");
+        fs::create_dir_all(&mod_dir).unwrap();
+
+        fs::write(
+            mod_dir.join("mod.rs"),
+            "#[allow(unused_imports)]\nuse super::*;\nunsafe extern \"C\" { pub fn add(a: ::core::ffi::c_int) -> ::core::ffi::c_int; }\n",
+        )
+        .unwrap();
+        fs::write(
+            mod_dir.join("fun_add.rs"),
+            "use super::*;\npub fn add(a: ::core::ffi::c_int) -> ::core::ffi::c_int { a }\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "// generated by c2rust\n#![allow(non_camel_case_types)]\nmod mod_foo;\n",
+        )
+        .unwrap();
+
+        let feat = make_merge_feature(&tmp);
+        feat.merge().unwrap();
+
+        let report_path = feature_root.join("meta/merge-interface-report.md");
+        assert!(
+            report_path.exists(),
+            "merge-interface-report.md should be created"
+        );
+        let content = fs::read_to_string(&report_path).unwrap();
+        assert!(
+            content.contains("# Merge Interface Report"),
+            "report should have title"
+        );
+        assert!(
+            content.contains("mod_foo"),
+            "report should mention mod_foo"
+        );
+        assert!(
+            content.contains("## Summary"),
+            "report should have Summary section"
+        );
+        assert!(
+            content.contains("lib.rs"),
+            "report should mention lib.rs"
+        );
+    }
+
+    /// Verify merge report lists functions, variables, and local FFI correctly.
+    #[test]
+    fn merge_report_content_functions_variables_ffi() {
+        let tmp = TempDir::new().unwrap();
+        let feature_root = tmp.path().join(".c2rust/default");
+
+        let src = feature_root.join("rust/src");
+        let mod_dir = src.join("mod_bar");
+        fs::create_dir_all(&mod_dir).unwrap();
+
+        fs::write(
+            mod_dir.join("mod.rs"),
+            r#"
+#[allow(unused_imports)]
+use super::*;
+unsafe extern "C" {
+    pub fn unique_api(x: ::core::ffi::c_int) -> ::core::ffi::c_int;
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            mod_dir.join("fun_compute.rs"),
+            "use super::*;\npub fn compute() -> ::core::ffi::c_int { 0 }\n",
+        )
+        .unwrap();
+        fs::write(
+            mod_dir.join("var_global.rs"),
+            "use super::*;\npub static mut global: ::core::ffi::c_int = 0;\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "// generated\n#![allow(non_camel_case_types)]\nmod mod_bar;\n",
+        )
+        .unwrap();
+
+        let feat = make_merge_feature(&tmp);
+        feat.merge().unwrap();
+
+        let content =
+            fs::read_to_string(feature_root.join("meta/merge-interface-report.md")).unwrap();
+
+        // Functions discovered from fun_*.rs stems
+        assert!(
+            content.contains("`compute`"),
+            "report should list compute function, got:\n{content}"
+        );
+        // Variables discovered from var_*.rs stems
+        assert!(
+            content.contains("`global`"),
+            "report should list global variable, got:\n{content}"
+        );
+        // Module-local FFI (not shared, so stays in module)
+        assert!(
+            content.contains("`unique_api`"),
+            "report should list unique_api FFI, got:\n{content}"
+        );
+        // Source files section
+        assert!(
+            content.contains("fun_compute.rs"),
+            "report should list source files, got:\n{content}"
+        );
+    }
+
+    /// Verify merge report correctly identifies shared FFI moved to lib.rs.
+    #[test]
+    fn merge_report_shows_shared_ffi_in_lib_rs() {
+        let tmp = TempDir::new().unwrap();
+        let feature_root = tmp.path().join(".c2rust/default");
+
+        let src = feature_root.join("rust/src");
+        for mod_name in &["mod_x", "mod_y"] {
+            let mod_dir = src.join(mod_name);
+            fs::create_dir_all(&mod_dir).unwrap();
+            fs::write(
+                mod_dir.join("mod.rs"),
+                r#"
+#[allow(unused_imports)]
+use super::*;
+unsafe extern "C" {
+    pub fn shared_helper(v: ::core::ffi::c_int) -> ::core::ffi::c_int;
+}
+"#,
+            )
+            .unwrap();
+        }
+        fs::write(
+            src.join("lib.rs"),
+            "// generated\n#![allow(non_camel_case_types)]\nmod mod_x;\nmod mod_y;\n",
+        )
+        .unwrap();
+
+        let feat = make_merge_feature(&tmp);
+        feat.merge().unwrap();
+
+        let content =
+            fs::read_to_string(feature_root.join("meta/merge-interface-report.md")).unwrap();
+
+        assert!(
+            content.contains("shared_helper"),
+            "report should list shared_helper in the shared FFI section, got:\n{content}"
+        );
+        assert!(
+            content.contains("lib.rs` — Shared FFI"),
+            "report should have a shared FFI section, got:\n{content}"
+        );
+    }
+
+    /// Verify write_merge_report directly with controlled data.
+    #[test]
+    fn write_merge_report_format() {
+        let tmp = TempDir::new().unwrap();
+        let feat = make_merge_feature(&tmp);
+        // Ensure meta dir exists
+        fs::create_dir_all(tmp.path().join(".c2rust/default/meta")).unwrap();
+
+        let summaries = vec![MergeModSummary {
+            mod_name: "mod_alpha".to_string(),
+            fn_names: vec!["do_work".to_string()],
+            var_names: vec!["state_var".to_string()],
+            ffi_names: vec!["local_ffi_fn".to_string()],
+            source_files: vec![
+                "mod.rs".to_string(),
+                "fun_do_work.rs".to_string(),
+                "var_state_var.rs".to_string(),
+            ],
+        }];
+        let shared = vec!["global_init".to_string()];
+
+        feat.write_merge_report(&summaries, &shared).unwrap();
+
+        let report_path = tmp.path().join(".c2rust/default/meta/merge-interface-report.md");
+        assert!(report_path.exists());
+        let content = fs::read_to_string(&report_path).unwrap();
+
+        assert!(content.contains("# Merge Interface Report — feature `default`"));
+        assert!(content.contains("## Summary"));
+        assert!(content.contains("Merged modules | 1"));
+        assert!(content.contains("Total functions | 1"));
+        assert!(content.contains("Total variables | 1"));
+        assert!(content.contains("Module-local FFI items | 1"));
+        assert!(content.contains("Shared FFI moved to `lib.rs` | 1"));
+        assert!(content.contains("`global_init`"));
+        assert!(content.contains("## mod_alpha"));
+        assert!(content.contains("`do_work`"));
+        assert!(content.contains("`state_var`"));
+        assert!(content.contains("`local_ffi_fn`"));
+        assert!(content.contains("fun_do_work.rs"));
     }
 }
