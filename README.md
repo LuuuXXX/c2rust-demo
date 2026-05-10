@@ -1,141 +1,181 @@
 # c2rust-demo
 
-A minimal but usable CLI tool that integrates C-build capture with Rust scaffolding generation, combining the capabilities of [`c2rust-build`](https://github.com/LuuuXXX/c2rust-build) and [`c2rust-code-analyse`](https://github.com/LuuuXXX/c2rust-code-analyse).
+`c2rust-demo` 是一个面向 C 项目的命令行工具，当前提供两步流程：
 
-## Current scope
+1. `init`：捕获 C 构建过程并生成按符号拆分的 Rust 脚手架。
+2. `merge`：将 `init` 产出的按符号文件合并为按模块文件，并汇总共享 FFI 声明。
 
-Only `init` is implemented.  `update`, `reinit`, `merge`, and `sync` are **not** part of this first version.
+## 当前能力范围
 
-## How it works
+- ✅ 已实现：`init`、`merge`
+- ❌ 未实现：`update`、`reinit`、`sync`
 
-```
-Your C project
-     │
-     ▼
-c2rust-demo init -- make
-     │
-     ├─ Build libhook.so (hook/hook.c)
-     ├─ Run make with LD_PRELOAD=libhook.so
-     │    └─ hook intercepts gcc/clang and preprocesses each .c file
-     │         → .c2rust/<feature>/c/**/*.c2rust
-     │         → .c2rust/<feature>/c/**/*.c2rust.opts
-     │         → .c2rust/<feature>/c/targets.list  (if linker is invoked)
-     │
-     ├─ Interactive file selection
-     │    → .c2rust/<feature>/meta/selected_files.json
-     │
-     └─ Init split (via clang AST + bindgen)
-          → .c2rust/<feature>/rust/  (cargo new --lib)
-          → rust/src/lib.rs + lib.normalized
-          → rust/src/mod_<file>/
-               ├── mod.rs + mod.normalized
-               ├── fun_<name>.rs  (one per function)
-               ├── var_<name>.rs  (one per variable)
-               ├── decl_<name>.rs (FFI declarations)
-               └── <name>.c       (normalized C source)
+## 核心流程
+
+```text
+C 项目目录
+   │
+   ├─ c2rust-demo init -- <构建命令>
+   │    ├─ 编译 hook/libhook.so
+   │    ├─ 通过 LD_PRELOAD 注入构建过程，捕获 .c2rust 与 .c2rust.opts
+   │    ├─ 交互式选择参与转换的文件（非交互环境自动全选）
+   │    ├─ 调用 bindgen 生成各模块类型/声明
+   │    └─ 生成 .c2rust/<feature>/rust 及 init-interface-report.md
+   │
+   └─ c2rust-demo merge [--feature <name>]
+        ├─ 合并 rust/src/mod_*/ 下的 fun_*.rs、var_*.rs
+        ├─ 去重跨模块重复 FFI 并上提到 lib.rs
+        ├─ 输出 rust/src.2（合并结果）
+        ├─ 备份 rust/src.1（init 原始结果）
+        └─ 将 rust/src 置为指向 src.2 的符号链接，并生成 merge-interface-report.md
 ```
 
-## Dependencies
+## 项目结构（关键文件）
 
-| Tool | Required | Notes |
-|------|----------|-------|
-| Linux | ✓ | `LD_PRELOAD` hook requires Linux |
-| Rust / cargo | ✓ | ≥ 1.82 |
-| gcc | ✓ | For building `libhook.so` and C preprocessing |
-| make | Recommended | Or any other build tool |
-| clang | ✓ | For AST dump (`-ast-dump=json`) |
-| bindgen | ✓ | Generates `mod.rs` from C headers |
+- `src/main.rs`：CLI 入口（`init` / `merge`）
+- `src/capture.rs`：hook 构建与带环境变量的构建命令执行
+- `src/layout.rs`：`.c2rust/<feature>/` 目录与元数据管理
+- `src/selector.rs`：交互式文件选择（`dialoguer`）
+- `src/split/feature.rs`：`init` 阶段 Rust 脚手架与报告生成
+- `src/split/merge.rs`：`merge` 阶段合并、FFI 去重与报告生成
+- `hook/`：`libhook.so` 源码与 Makefile
+- `tests/`：单元测试 + 集成测试
+- `scripts/validate-cjson.sh`：对 cJSON 的端到端验证脚本（与 CI 对齐）
 
-Install `bindgen`:
+## 环境要求
+
+- Linux（依赖 `LD_PRELOAD`，且 `merge` 使用 Unix 符号链接）
+- Rust / Cargo（`Cargo.toml` 要求 `rust-version = 1.82`）
+- `gcc`（构建 `libhook.so`，并用于常见 C 构建链路）
+- `make`（用于构建 hook；项目构建命令本身可替换）
+- `clang`（AST 处理相关流程）
+- `bindgen`（`init` 生成 `mod.rs` 所需）
+
+安装 `bindgen-cli`：
+
 ```bash
 cargo install bindgen-cli
 ```
 
-## Usage
-
-### Basic
+## 构建
 
 ```bash
-# In the root of your C project:
+cargo build
+```
+
+发布构建：
+
+```bash
+cargo build --release
+```
+
+## 使用方式
+
+### 1) init：捕获构建并生成初始 Rust 结构
+
+在目标 C 项目根目录（或其子目录）执行：
+
+```bash
+c2rust-demo init -- <你的构建命令>
+```
+
+示例：
+
+```bash
 c2rust-demo init -- make
-```
-
-### With a custom feature name
-
-```bash
 c2rust-demo init --feature foo -- make -j4
+c2rust-demo init -- gcc -c cJSON.c -I.
 ```
 
-### Pass arguments through `--`
+说明：
 
-Everything after `--` is treated as the build command:
+- `--feature` 默认值为 `default`
+- `--` 之后的所有参数会原样作为构建命令传入
+
+### 2) merge：将按符号文件合并为按模块文件
 
 ```bash
-c2rust-demo init -- cmake --build build/
-c2rust-demo init -- ninja -C out/
+c2rust-demo merge
+c2rust-demo merge --feature foo
 ```
 
-## Output structure
+`merge` 需要先完成对应 feature 的 `init`。
 
-```
+## 输入与输出说明
+
+### 输入（init）
+
+- 必填：构建命令（`BUILD_CMD...`）
+- 可选：`--feature <name>`
+
+### 输出目录
+
+`init` 后（示意）：
+
+```text
 .c2rust/<feature>/
-├── c/                  Build capture output
-│   ├── src/
-│   │   ├── foo.c2rust          Preprocessed C (for AST analysis)
-│   │   └── foo.c2rust.opts     Compiler flags used
-│   └── targets.list            Link targets (if any)
-├── meta/               Metadata
-│   ├── build_cmd.txt           The original build command
-│   └── selected_files.json     Files the user chose to include
-└── rust/               Generated Rust project (cargo lib)
+├── c/                       # 捕获到的 .c2rust / .c2rust.opts / targets.list
+├── meta/
+│   ├── build_cmd.txt
+│   ├── selected_files.json
+│   └── init-interface-report.md
+└── rust/
     ├── Cargo.toml
     └── src/
-        ├── lib.rs              Module re-exports + crate attributes
-        ├── lib.normalized      Baseline copy of lib.rs
-        └── mod_src_foo/        One directory per C source file
-            ├── mod.rs          bindgen output (normalized)
-            ├── mod.normalized  Baseline copy of mod.rs
-            ├── fun_add.rs      Stub for function `add`
-            ├── fun_add.c       Normalized C code for `add`
-            ├── decl_add.rs     FFI declaration for `add`
-            └── ...
+        ├── lib.rs
+        ├── lib.normalized
+        └── mod_*/
+            ├── mod.rs
+            ├── mod.normalized
+            ├── fun_*.rs / fun_*.c
+            ├── var_*.rs / var_*.c
+            └── decl_*.rs
 ```
 
-## Interactive file selection
+`merge` 后（在上面基础上新增/调整）：
 
-After the build-capture phase, `c2rust-demo` scans for captured `.c2rust` files and presents a multi-select prompt (powered by [`dialoguer`](https://crates.io/crates/dialoguer)):
-
+```text
+.c2rust/<feature>/
+├── meta/
+│   └── merge-interface-report.md
+└── rust/
+    ├── src.1/               # init 原始输出备份
+    ├── src -> src.2         # 符号链接
+    └── src.2/               # 合并后输出（含 lib.rs 与 mod_*.rs）
 ```
-Select files to include in this feature (space to toggle, enter to confirm)
-> [ ] src/foo.c2rust
-  [x] src/bar.c2rust
-  [x] src/baz.c2rust
-```
 
-- Use **space** to toggle individual files.
-- Press **Enter** to confirm.
-- Files that are **not** selected are recorded but excluded from the Rust scaffolding step.
-- When stdin is not a terminal (CI, scripts, pipes) all files are selected automatically.
+## 开发与测试
 
-## Running tests
-
-Unit tests (no toolchain required):
+运行全部测试：
 
 ```bash
 cargo test
 ```
 
-Integration tests auto-detect whether the required tools (gcc, make, clang, bindgen) are
-available and print a clear skip message if any are missing:
+仅运行集成测试：
 
 ```bash
 cargo test --test integration
 ```
 
-## Current limitations
+集成测试会自动检测外部工具（如 `gcc`、`make`、`clang`、`bindgen`），缺失时打印跳过信息。
 
-- **Linux only** – relies on `LD_PRELOAD`.
-- **Only `init`** – `update`, `reinit`, `merge`, `sync` are not implemented.
-- `set_lint_rules` (cargo lint config) is not implemented in this version; lint configuration must be managed manually if desired.
-- The clang binary used for AST dumps can be overridden with the `C2RUST_CLANG` environment variable (defaults to `clang`).
-- The hook intercepts `gcc` / `clang` / `cc` by default; set `C2RUST_CC` to use a different compiler name, and `C2RUST_LD` for a different linker.
+可在本地执行 cJSON 验证脚本：
+
+```bash
+./scripts/validate-cjson.sh
+```
+
+## 可选环境变量
+
+- `C2RUST_CLANG`：覆盖默认 `clang` 可执行文件名
+- `C2RUST_REMOVE_STATIC`：设为非空时启用 static/inline 公开化步骤
+- `C2RUST_CC`：hook 识别的编译器名称（默认自动匹配 `gcc/clang/cc` 及带版本后缀）
+- `C2RUST_LD`：hook 识别的链接器名称（默认自动匹配 `ld/lld`）
+- `C2RUST_DEBUG`：设为非空时输出 hook 调试日志到 stderr
+
+## 注意事项
+
+- 目前仅支持 Linux。
+- `merge` 会调整 `rust/src` 为符号链接；如需查看 `init` 原始结果，请看 `rust/src.1`。
+- 本仓库根目录包含历史归档文件（如 `cJSON-*.rar`），不参与 `c2rust-demo` 运行逻辑。
