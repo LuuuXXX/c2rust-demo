@@ -44,12 +44,11 @@ C 项目目录
 
 ## 环境要求
 
-- Linux（依赖 `LD_PRELOAD`，且 `merge` 使用 Unix 符号链接）
+- Linux（依赖 `LD_PRELOAD` 和 Unix 符号链接）
 - Rust / Cargo（`Cargo.toml` 要求 `rust-version = 1.82`）
-- `gcc`（构建 `libhook.so`，并用于常见 C 构建链路）
-- `make`（用于构建 hook；项目构建命令本身可替换）
-- `clang`（AST 处理相关流程）
-- `bindgen`（`init` 生成 `mod.rs` 所需）
+- `gcc`、`make`（用于构建 `hook/libhook.so`）
+- `bindgen-cli`（`init` 阶段需要 `bindgen` 命令）
+- clang / libclang 环境（供底层分析与 bindgen 相关流程使用）
 
 安装 `bindgen-cli`：
 
