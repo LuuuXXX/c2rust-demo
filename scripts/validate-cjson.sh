@@ -177,9 +177,11 @@ echo ""
 
 # -----------------------------------------------------------------------
 # Step 8: cargo check the generated Rust project
+# RUSTC_BOOTSTRAP=1 is required because the generated lib.rs uses
+# #![feature(linkage)] (documented in the generated file's comment).
 # -----------------------------------------------------------------------
 echo "--- Step 8: Running cargo check on generated Rust project ---"
-cargo check --manifest-path "$FEATURE_ROOT/rust/Cargo.toml" 2>&1
+RUSTC_BOOTSTRAP=1 cargo check --manifest-path "$FEATURE_ROOT/rust/Cargo.toml" 2>&1
 if [ $? -eq 0 ]; then
     echo "  [PASS] cargo check passed"
     PASS=$((PASS + 1))

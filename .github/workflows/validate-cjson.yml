@@ -193,8 +193,12 @@ jobs:
       # ------------------------------------------------------------------
       # 12. cargo check the generated Rust project
       #     Verifies that the generated code is syntactically valid Rust.
+      #     RUSTC_BOOTSTRAP=1 is required because the generated lib.rs uses
+      #     #![feature(linkage)] (documented in the generated file's comment).
       # ------------------------------------------------------------------
       - name: cargo check generated Rust project
+        env:
+          RUSTC_BOOTSTRAP: "1"
         run: |
           echo "=== cargo check on generated Rust project ==="
           cargo check --manifest-path /tmp/cjson/.c2rust/default/rust/Cargo.toml
