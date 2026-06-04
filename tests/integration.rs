@@ -15,21 +15,27 @@ fn fixture_dir() -> PathBuf {
 }
 
 /// Build the hook library and return its path, or `None` on failure.
-fn build_hook_for_tests() -> Option<PathBuf> {
-    let hook_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hook");
-    if !hook_dir.join("Makefile").exists() {
-        return None;
-    }
-    let status = Command::new("make")
-        .arg("-s")
-        .current_dir(&hook_dir)
+///
+/// Compiles the embedded hook source directly with `gcc`; `make` is not
+/// required.  Uses a temporary directory for isolation and automatic cleanup.
+fn build_hook_for_tests() -> Option<(tempfile::TempDir, PathBuf)> {
+    // Use the same embedded source as the production binary to avoid drift.
+    const HOOK_SRC: &str = include_str!("../hook/hook.c");
+    let dir = tempfile::TempDir::new().ok()?;
+    let src_path = dir.path().join("hook.c");
+    std::fs::write(&src_path, HOOK_SRC).ok()?;
+    let so = dir.path().join("libhook.so");
+    let status = Command::new("gcc")
+        .args(["-Wall", "-fPIC", "-shared", "-o"])
+        .arg(&so)
+        .arg(&src_path)
+        .arg("-ldl")
         .status()
         .ok()?;
     if !status.success() {
         return None;
     }
-    let so = hook_dir.join("libhook.so");
-    if so.exists() { Some(so) } else { None }
+    if so.exists() { Some((dir, so)) } else { None }
 }
 
 /// Returns a list of tools that are missing from the PATH.
@@ -123,12 +129,6 @@ fn cli_init_custom_feature_writes_meta() {
         return;
     }
 
-    let Some(hook_so) = build_hook_for_tests() else {
-        eprintln!("Skipping cli_init_custom_feature_writes_meta: failed to build libhook.so");
-        return;
-    };
-    let _ = hook_so; // 仅验证 hook 可构建；init 本身会重新构建
-
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = fixture_dir();
     let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
@@ -172,7 +172,7 @@ fn build_capture_generates_c2rust_files() {
         return;
     }
 
-    let Some(hook_so) = build_hook_for_tests() else {
+    let Some((_hook_dir, hook_so)) = build_hook_for_tests() else {
         eprintln!("Skipping build_capture: failed to build libhook.so");
         return;
     };
@@ -434,7 +434,7 @@ fn coverage_case2_cov_obj_created() {
         return;
     }
 
-    let Some(hook_so) = build_hook_for_tests() else {
+    let Some((_hook_dir, hook_so)) = build_hook_for_tests() else {
         eprintln!("Skipping coverage_case2_cov_obj_created: failed to build libhook.so");
         return;
     };

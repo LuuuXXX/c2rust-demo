@@ -4,32 +4,52 @@ use anyhow::anyhow;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Build the `libhook.so` from `hook/Makefile` adjacent to the binary.
-///
-/// Returns the path to the built `libhook.so`.
-pub fn build_hook() -> Result<PathBuf> {
-    let hook_dir = hook_dir()?;
-    let so = hook_dir.join("libhook.so");
+/// The hook C source is embedded in the binary at compile time.
+const HOOK_SRC: &str = include_str!("../hook/hook.c");
 
-    println!("Building hook library from {}...", hook_dir.display());
-    let status = Command::new("make")
-        .current_dir(&hook_dir)
-        .arg("-s")
+/// A compiled `libhook.so` living in a temporary directory.
+///
+/// The temporary directory is kept alive as long as this value is held.
+/// Drop it only after the build command has finished.
+pub struct BuiltHook {
+    pub path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+/// Compile `libhook.so` from the embedded C source into a fresh temporary
+/// directory.  Only `gcc` is required; `make` and the `hook/` source tree are
+/// not needed at runtime.
+pub fn build_hook() -> Result<BuiltHook> {
+    let dir = tempfile::TempDir::new()
+        .map_err(|e| anyhow!("failed to create temporary directory for hook compilation: {}", e))?;
+
+    let src_path = dir.path().join("hook.c");
+    std::fs::write(&src_path, HOOK_SRC)
+        .map_err(|e| anyhow!("failed to write hook.c to {}: {}", src_path.display(), e))?;
+
+    let so_path = dir.path().join("libhook.so");
+
+    println!("Compiling hook library...");
+    let status = Command::new("gcc")
+        .args(["-Wall", "-fPIC", "-shared", "-o"])
+        .arg(&so_path)
+        .arg(&src_path)
+        .arg("-ldl")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| anyhow!("failed to run make in {}: {}", hook_dir.display(), e))?;
+        .map_err(|e| anyhow!("failed to run gcc: {}", e))?;
 
     if !status.success() {
-        return Err(anyhow!("make failed in {}", hook_dir.display()));
+        return Err(anyhow!("gcc failed to compile libhook.so"));
     }
 
-    if !so.exists() {
-        return Err(anyhow!("libhook.so not found after build at {}", so.display()));
+    if !so_path.exists() {
+        return Err(anyhow!("libhook.so not found after compilation at {}", so_path.display()));
     }
 
-    println!("Hook library built: {}", so.display());
-    Ok(so)
+    println!("Hook library compiled: {}", so_path.display());
+    Ok(BuiltHook { path: so_path, _dir: dir })
 }
 
 /// Execute the user-supplied build command with LD_PRELOAD set to libhook.so.
@@ -165,35 +185,6 @@ pub fn post_build_cov(lo: &FeatureLayout) -> Result<Option<PathBuf>> {
     Ok(Some(cov_lib))
 }
 
-/// Locate the `hook/` directory, starting from the directory of the running
-/// binary and searching upward.  Falls back to a path relative to the manifest.
-fn hook_dir() -> Result<PathBuf> {
-    // 1. Try next to the running binary (installed or `cargo run`).
-    //    Walk up several levels to handle both the normal cargo layout
-    //    (target/debug/) and the llvm-cov layout (target/llvm-cov-target/debug/).
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        while let Some(current) = dir {
-            let candidate = current.join("hook");
-            if candidate.join("Makefile").exists() {
-                return Ok(candidate);
-            }
-            dir = current.parent().map(|p| p.to_path_buf());
-        }
-    }
-
-    // 2. Relative to the current working directory (development)
-    let cwd_candidate = std::env::current_dir()
-        .map_err(|e| anyhow!("current_dir: {}", e))?
-        .join("hook");
-    if cwd_candidate.join("Makefile").exists() {
-        return Ok(cwd_candidate);
-    }
-
-    Err(anyhow!(
-        "hook/ directory with Makefile not found (searched near binary and cwd)"
-    ))
-}
 
 #[cfg(test)]
 mod tests {
