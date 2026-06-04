@@ -20,6 +20,8 @@ jobs:
   coverage:
     name: C Coverage via cargo llvm-cov (cJSON)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       # ----------------------------------------------------------------

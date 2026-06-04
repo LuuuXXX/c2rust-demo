@@ -301,7 +301,7 @@ static void preprocess_cfile(const char* cc, int argc, char* argv[], const char*
              * gcc 不支持 -fprofile-instr-generate/-fcoverage-mapping, 故仅对 clang. */
             const char* cov_flag1 = NULL;
             const char* cov_flag2 = NULL;
-            if (getenv(C2RUST_COVERAGE_ENV) &&
+            if (cc && getenv(C2RUST_COVERAGE_ENV) &&
                     is_name_match(path_basename(cc), "clang")) {
                 cov_flag1 = "-fprofile-instr-generate";
                 cov_flag2 = "-fcoverage-mapping";

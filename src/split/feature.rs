@@ -394,7 +394,13 @@ RUSTC_BOOTSTRAP = "1"
         // project_root = .c2rust/<name>/../../  = project root
         let project_root = match self.root.parent().and_then(|p| p.parent()) {
             Some(p) => p.to_path_buf(),
-            None => return vec![],
+            None => {
+                eprintln!(
+                    "Warning: could not determine project root from '{}'; skipping C source collection",
+                    self.root.display()
+                );
+                return vec![];
+            }
         };
 
         let mut sources = Vec::new();

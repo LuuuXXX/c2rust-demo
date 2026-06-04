@@ -194,13 +194,20 @@ add_type_alias() {
 
     echo "  自动修复: 添加占位类型别名 'type $type_name = u8;' 到 $lib_rs"
     # 在第一个 #![...] 属性之后插入（保持属性在最顶部）
+    # 使用临时文件而非 sed -i，以确保跨 Linux 发行版的可移植性。
     local insert_after
     insert_after=$(grep -n "^#!\[" "$lib_rs" | tail -1 | cut -d: -f1)
+    local tmpfile
+    tmpfile="$(mktemp)"
     if [[ -n "$insert_after" ]]; then
-        sed -i "${insert_after}a\\ \n// Auto-fix: placeholder for unknown C type\npub type ${type_name} = u8;" "$lib_rs"
+        head -n "$insert_after" "$lib_rs" > "$tmpfile"
+        printf '\n// Auto-fix: placeholder for unknown C type\npub type %s = u8;\n' "${type_name}" >> "$tmpfile"
+        tail -n +"$((insert_after + 1))" "$lib_rs" >> "$tmpfile"
     else
-        echo -e "\n// Auto-fix: placeholder for unknown C type\npub type ${type_name} = u8;" >> "$lib_rs"
+        cat "$lib_rs" > "$tmpfile"
+        printf '\n// Auto-fix: placeholder for unknown C type\npub type %s = u8;\n' "${type_name}" >> "$tmpfile"
     fi
+    mv "$tmpfile" "$lib_rs"
 }
 
 # -------------------------------------------------------------------------
