@@ -83,4 +83,4 @@ jobs:
       # 8. Generate test coverage report
       # ------------------------------------------------------------------
       - name: Generate coverage report
-        run: cargo llvm-cov --summary-only --test-threads=1
+        run: cargo llvm-cov --summary-only -- --test-threads=1
