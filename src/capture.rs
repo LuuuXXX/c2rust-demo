@@ -168,21 +168,17 @@ pub fn post_build_cov(lo: &FeatureLayout) -> Result<Option<PathBuf>> {
 /// Locate the `hook/` directory, starting from the directory of the running
 /// binary and searching upward.  Falls back to a path relative to the manifest.
 fn hook_dir() -> Result<PathBuf> {
-    // 1. Try next to the running binary (installed or `cargo run`)
+    // 1. Try next to the running binary (installed or `cargo run`).
+    //    Walk up several levels to handle both the normal cargo layout
+    //    (target/debug/) and the llvm-cov layout (target/llvm-cov-target/debug/).
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("hook");
+        let mut dir = exe.parent().map(|p| p.to_path_buf());
+        while let Some(current) = dir {
+            let candidate = current.join("hook");
             if candidate.join("Makefile").exists() {
                 return Ok(candidate);
             }
-            // When built with `cargo`, the binary lives in target/debug or target/release.
-            // Walk up two more levels to find the workspace root.
-            if let Some(workspace) = parent.parent().and_then(|p| p.parent()) {
-                let candidate = workspace.join("hook");
-                if candidate.join("Makefile").exists() {
-                    return Ok(candidate);
-                }
-            }
+            dir = current.parent().map(|p| p.to_path_buf());
         }
     }
 
