@@ -249,10 +249,16 @@ jobs:
           echo ""
           echo "Coverage summary written to /tmp/coverage-summary.txt"
 
-          # Verify the report ran without fatal errors
-          if grep -qi "error\|fatal\|panicked" /tmp/coverage-summary.txt && \
-             ! grep -qi "Filename\|Lines\|Functions" /tmp/coverage-summary.txt; then
+          # Verify the report contains a coverage table (Filename/Lines/Functions headers)
+          if ! grep -qi "Filename\|Lines\|Functions" /tmp/coverage-summary.txt; then
             echo "  [FAIL] cargo llvm-cov did not produce a coverage table"
+            cat /tmp/coverage-summary.txt
+            exit 1
+          fi
+          # Check separately for fatal errors that indicate a broken run
+          if grep -qi "panicked at\|fatal error" /tmp/coverage-summary.txt; then
+            echo "  [FAIL] cargo llvm-cov reported a fatal error"
+            cat /tmp/coverage-summary.txt
             exit 1
           fi
           echo "  [PASS] C-side coverage report generated"
@@ -266,8 +272,14 @@ jobs:
         run: |
           cargo llvm-cov \
             --manifest-path /tmp/cjson/.c2rust/default/rust/Cargo.toml \
-            --lcov --output-path /tmp/c-coverage.lcov || true
-          echo "lcov report: $(wc -l < /tmp/c-coverage.lcov 2>/dev/null || echo 0) lines"
+            --lcov --output-path /tmp/c-coverage.lcov
+          lcov_lines=$(wc -l < /tmp/c-coverage.lcov 2>/dev/null || echo 0)
+          echo "lcov report: $lcov_lines lines written to /tmp/c-coverage.lcov"
+          if [ "$lcov_lines" -eq 0 ]; then
+            echo "  [WARN] lcov report is empty"
+          else
+            echo "  [PASS] lcov report generated successfully"
+          fi
 
       # ----------------------------------------------------------------
       # 15. Show generated output tree (always, for debugging)
