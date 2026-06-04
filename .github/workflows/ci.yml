@@ -80,7 +80,21 @@ jobs:
         run: cargo test -- --test-threads=1
 
       # ------------------------------------------------------------------
-      # 8. Generate test coverage report
+      # 8. Generate test coverage report (Rust)
       # ------------------------------------------------------------------
       - name: Generate coverage report
         run: cargo llvm-cov --summary-only -- --test-threads=1
+
+      # ------------------------------------------------------------------
+      # 9. Verify C coverage via instrumented fixture
+      #
+      #    `tests/fixtures/cov-demo` is a standalone Cargo project whose
+      #    build.rs compiles math.c and counter.c with
+      #    -fprofile-instr-generate -fcoverage-mapping and links the
+      #    resulting objects into libcov.a.  Running `cargo llvm-cov`
+      #    against it produces a coverage report that includes both Rust
+      #    (lib.rs) and C (math.c, counter.c) source files, proving that
+      #    the c2rust-demo coverage workflow works end-to-end.
+      # ------------------------------------------------------------------
+      - name: Verify C coverage (cargo llvm-cov with instrumented C)
+        run: cargo llvm-cov --manifest-path tests/fixtures/cov-demo/Cargo.toml --summary-only

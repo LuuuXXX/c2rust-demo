@@ -1,0 +1,10 @@
+[package]
+name = "cov-demo"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+# This fixture is intentionally NOT part of the c2rust-demo workspace.
+# It is a standalone project used to verify that C code compiled with
+# LLVM coverage instrumentation shows up in `cargo llvm-cov` output.
+
+[dependencies]
