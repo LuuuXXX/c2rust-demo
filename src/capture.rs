@@ -21,7 +21,7 @@ pub struct BuiltHook {
 /// not needed at runtime.
 pub fn build_hook() -> Result<BuiltHook> {
     let dir = tempfile::TempDir::new()
-        .map_err(|e| anyhow!("failed to create temp dir for hook: {}", e))?;
+        .map_err(|e| anyhow!("failed to create temporary directory for hook compilation: {}", e))?;
 
     let src_path = dir.path().join("hook.c");
     std::fs::write(&src_path, HOOK_SRC)
