@@ -228,24 +228,35 @@ fn full_init_creates_rust_project() {
         return;
     }
 
+    // Copy the fixture into a fresh temp directory so that C2RUST_PROJECT_ROOT
+    // (derived from the working directory) is an ancestor of the C source files
+    // being compiled.  Running `make -C<fixture>` from a different directory
+    // would cause the hook to skip all files because they are not under
+    // C2RUST_PROJECT_ROOT.
     let tmp = tempfile::TempDir::new().unwrap();
     let project_root = tmp.path();
     let fixture = fixture_dir();
 
-    // Clean first
+    // Copy fixture files into the temp directory, preserving the src/ layout.
+    let src_fixture = fixture.join("src");
+    let src_tmp = project_root.join("src");
+    std::fs::create_dir_all(&src_tmp).unwrap();
+    for entry in std::fs::read_dir(&src_fixture).unwrap().flatten() {
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), src_tmp.join(entry.file_name())).unwrap();
+        }
+    }
+    std::fs::copy(fixture.join("Makefile"), project_root.join("Makefile")).unwrap();
+
+    // Clean first (operates on the copy)
     let _ = Command::new("make")
-        .current_dir(&fixture)
+        .current_dir(project_root)
         .arg("clean")
         .status();
 
     let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
         .current_dir(project_root)
-        .args([
-            "init",
-            "--",
-            "make",
-            &format!("-C{}", fixture.display()),
-        ])
+        .args(["init", "--", "make"])
         .status()
         .expect("c2rust-demo init");
 
