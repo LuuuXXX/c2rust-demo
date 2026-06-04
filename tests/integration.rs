@@ -237,7 +237,9 @@ fn full_init_creates_rust_project() {
     let project_root = tmp.path();
     let fixture = fixture_dir();
 
-    // Copy fixture files into the temp directory, preserving the src/ layout.
+    // Copy fixture files into the temp directory.  The simple fixture only has
+    // flat .c files directly under src/, so we copy those files (no nested
+    // subdirectories) along with the Makefile.
     let src_fixture = fixture.join("src");
     let src_tmp = project_root.join("src");
     std::fs::create_dir_all(&src_tmp).unwrap();
