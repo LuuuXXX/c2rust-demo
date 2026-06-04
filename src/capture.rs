@@ -264,4 +264,79 @@ mod tests {
         std::env::remove_var("C2RUST_COV_INSTRUMENTED");
         assert!(result.is_err());
     }
+
+    /// Case 2：cov_obj 目录存在但没有 .o 文件时应返回错误。
+    #[test]
+    fn post_build_cov_case2_errors_when_cov_obj_empty() {
+        let _g = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let lo = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        std::env::set_var("C2RUST_COV", "1");
+        std::env::remove_var("C2RUST_COV_INSTRUMENTED");
+        lo.create_dirs().unwrap();
+        // cov_obj 目录已由 create_dirs 创建，但为空（无 .o 文件）
+
+        let result = post_build_cov(&lo);
+        std::env::remove_var("C2RUST_COV");
+        assert!(
+            result.is_err(),
+            "should error when cov_obj is empty"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no .o files found") || msg.contains("cov_obj"),
+            "error message should mention missing .o files, got: {msg}"
+        );
+    }
+
+    /// Case 1：targets list 存在但所有路径均无效时应返回错误。
+    #[test]
+    fn post_build_cov_case1_errors_when_all_paths_invalid() {
+        let _g = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let lo = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        std::env::set_var("C2RUST_COV", "1");
+        std::env::set_var("C2RUST_COV_INSTRUMENTED", "1");
+        lo.create_dirs().unwrap();
+
+        // 写入一个不存在的路径
+        std::fs::write(
+            lo.c_dir.join("cov_targets.list"),
+            "/nonexistent/path/libfoo.a\n",
+        )
+        .unwrap();
+
+        let result = post_build_cov(&lo);
+        std::env::remove_var("C2RUST_COV");
+        std::env::remove_var("C2RUST_COV_INSTRUMENTED");
+        assert!(result.is_err(), "should error when no valid .a path exists");
+    }
+
+    /// Case 1：targets list 中有空行和注释行时应跳过，仅使用有效路径。
+    #[test]
+    fn post_build_cov_case1_skips_blank_lines() {
+        let _g = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let lo = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        std::env::set_var("C2RUST_COV", "1");
+        std::env::set_var("C2RUST_COV_INSTRUMENTED", "1");
+        lo.create_dirs().unwrap();
+
+        let fake_a = tmp.path().join("real.a");
+        std::fs::write(&fake_a, b"").unwrap();
+
+        // 写入含有空行的列表，最后一行才是真实路径
+        std::fs::write(
+            lo.c_dir.join("cov_targets.list"),
+            format!("\n   \n{}\n", fake_a.display()),
+        )
+        .unwrap();
+
+        let result = post_build_cov(&lo);
+        std::env::remove_var("C2RUST_COV");
+        std::env::remove_var("C2RUST_COV_INSTRUMENTED");
+
+        let path = result.unwrap().expect("should return Some path");
+        assert_eq!(path, fake_a);
+    }
 }

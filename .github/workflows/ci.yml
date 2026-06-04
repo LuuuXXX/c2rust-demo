@@ -1,0 +1,73 @@
+# Continuous Integration
+#
+# Runs `cargo test` (unit + integration tests) on every push and pull request.
+# Integration tests that require external tools (gcc, make, clang, bindgen, ar)
+# auto-detect those tools and skip gracefully when present or absent.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 2. System dependencies required by integration tests
+      # ------------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc make clang libclang-dev binutils
+
+      # ------------------------------------------------------------------
+      # 3. Rust toolchain
+      # ------------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      # ------------------------------------------------------------------
+      # 4. Cache Cargo registry + build artifacts
+      # ------------------------------------------------------------------
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      # ------------------------------------------------------------------
+      # 5. Install bindgen-cli (needed by full_init integration tests)
+      # ------------------------------------------------------------------
+      - name: Install bindgen-cli
+        run: cargo install bindgen-cli
+
+      # ------------------------------------------------------------------
+      # 6. Build (ensures the binary exists before integration tests run)
+      # ------------------------------------------------------------------
+      - name: Build
+        run: cargo build
+
+      # ------------------------------------------------------------------
+      # 7. Run all tests
+      # ------------------------------------------------------------------
+      - name: Run tests
+        run: cargo test -- --test-threads=1

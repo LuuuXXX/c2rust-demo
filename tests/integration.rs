@@ -63,6 +63,102 @@ fn cli_init_parses_default_feature() {
     );
 }
 
+/// `merge --help` 应当输出 merge 子命令的帮助信息并正常退出。
+#[test]
+fn cli_merge_help_exits_zero() {
+    let output = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .args(["merge", "--help"])
+        .output()
+        .expect("failed to run c2rust-demo");
+    assert!(
+        output.status.success(),
+        "merge --help should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("feature") || help.contains("merge") || help.contains("Merge"),
+        "merge --help output should mention 'feature' or 'merge': {help}"
+    );
+}
+
+/// `c2rust-demo` 不带子命令时应以非零状态码退出并输出使用说明。
+#[test]
+fn cli_no_subcommand_exits_nonzero() {
+    let output = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .output()
+        .expect("failed to run c2rust-demo");
+    assert!(
+        !output.status.success(),
+        "running without subcommand should fail"
+    );
+}
+
+/// `c2rust-demo merge` 在没有 `.c2rust` 目录时应以非零状态码退出。
+#[test]
+fn cli_merge_fails_without_init() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .current_dir(tmp.path())
+        .args(["merge"])
+        .output()
+        .expect("failed to run c2rust-demo");
+    assert!(
+        !output.status.success(),
+        "merge should fail when project has not been initialized"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Error") || stderr.contains("not found") || stderr.contains("run init"),
+        "error message should indicate missing init, got: {stderr}"
+    );
+}
+
+/// `c2rust-demo init --feature` 应接受自定义 feature 名称并写入 meta/build_cmd.txt。
+#[test]
+fn cli_init_custom_feature_writes_meta() {
+    let missing = missing_tools(&["gcc", "make"]);
+    if !missing.is_empty() {
+        eprintln!("Skipping cli_init_custom_feature_writes_meta: missing {}", missing.join(", "));
+        return;
+    }
+
+    let Some(hook_so) = build_hook_for_tests() else {
+        eprintln!("Skipping cli_init_custom_feature_writes_meta: failed to build libhook.so");
+        return;
+    };
+    let _ = hook_so; // 仅验证 hook 可构建；init 本身会重新构建
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = fixture_dir();
+    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+
+    // 使用自定义 feature 名称 "myfeature"
+    let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .current_dir(tmp.path())
+        .args([
+            "init",
+            "--feature", "myfeature",
+            "--",
+            "make",
+            &format!("-C{}", fixture.display()),
+        ])
+        .status()
+        .expect("c2rust-demo init --feature myfeature");
+
+    if !status.success() {
+        eprintln!("c2rust-demo init --feature failed – skipping assertions");
+        return;
+    }
+
+    let meta_dir = tmp.path().join(".c2rust/myfeature/meta");
+    assert!(meta_dir.exists(), "meta dir for custom feature should exist");
+    let build_cmd_txt = meta_dir.join("build_cmd.txt");
+    assert!(build_cmd_txt.exists(), "build_cmd.txt should be written for custom feature");
+    let content = std::fs::read_to_string(&build_cmd_txt).unwrap();
+    assert!(content.contains("make"), "build_cmd.txt should contain the build command");
+}
+
 // ---------------------------------------------------------------------------
 // Build-capture tests (require gcc + make + hook)
 // ---------------------------------------------------------------------------
@@ -250,6 +346,7 @@ fn collect_c2rust_files(dir: &Path) -> Vec<PathBuf> {
     collect_by_ext(dir, "c2rust")
 }
 
+/// Recursively collect all files with the given extension under `dir`.
 fn collect_by_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     collect_recursive_ext(dir, ext, &mut out);

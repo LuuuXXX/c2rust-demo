@@ -277,4 +277,115 @@ mod tests {
         layout.create_dirs().unwrap();
         assert!(!layout.cov_obj_dir.exists());
     }
+
+    /// scan_c2rust_files 应当递归地在子目录中找到 .c2rust 文件。
+    #[test]
+    fn scan_c2rust_files_recursive() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("subdir");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(tmp.path().join("top.c2rust"), "").unwrap();
+        std::fs::write(sub.join("nested.c2rust"), "").unwrap();
+        std::fs::write(sub.join("ignored.c"), "").unwrap();
+        let mut files = scan_c2rust_files(tmp.path()).unwrap();
+        files.sort();
+        assert_eq!(files.len(), 2, "should find 2 .c2rust files recursively");
+        assert!(files.iter().any(|p| p.ends_with("top.c2rust")));
+        assert!(files.iter().any(|p| p.ends_with("nested.c2rust")));
+    }
+
+    /// scan_c2rust_files 在目录不存在时返回空列表而不报错。
+    #[test]
+    fn scan_c2rust_files_nonexistent_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let absent = tmp.path().join("does_not_exist");
+        let files = scan_c2rust_files(&absent).unwrap();
+        assert!(files.is_empty());
+    }
+
+    /// scan_c2rust_files 返回的路径应按字典序排序以保证确定性。
+    #[test]
+    fn scan_c2rust_files_sorted() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("z.c2rust"), "").unwrap();
+        std::fs::write(tmp.path().join("a.c2rust"), "").unwrap();
+        std::fs::write(tmp.path().join("m.c2rust"), "").unwrap();
+        let files = scan_c2rust_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 3);
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "files should be returned in sorted order");
+    }
+
+    /// save_selected_files 写入空列表时，JSON 文件内容为空数组。
+    #[test]
+    fn save_selected_files_empty_list() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        layout.create_dirs().unwrap();
+        layout.save_selected_files(&[]).unwrap();
+        let content =
+            std::fs::read_to_string(layout.meta_dir.join("selected_files.json")).unwrap();
+        assert!(
+            content.trim() == "[]",
+            "empty selection should write '[]', got: {content}"
+        );
+    }
+
+    /// 自定义 feature 名称时，各目录路径应反映该名称。
+    #[test]
+    fn feature_layout_custom_feature_name_paths() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "v2");
+        assert_eq!(layout.c_dir, tmp.path().join(".c2rust/v2/c"));
+        assert_eq!(layout.rust_dir, tmp.path().join(".c2rust/v2/rust"));
+        assert_eq!(layout.meta_dir, tmp.path().join(".c2rust/v2/meta"));
+        assert_eq!(layout.cov_obj_dir, tmp.path().join(".c2rust/v2/cov_obj"));
+        assert_eq!(layout.cov_dir, tmp.path().join(".c2rust/v2/cov"));
+    }
+
+    /// save_build_cmd 写入单个词的构建命令时，文件中不含多余空格。
+    #[test]
+    fn save_build_cmd_single_arg() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        layout.create_dirs().unwrap();
+        layout.save_build_cmd(&["cmake".into()]).unwrap();
+        let content =
+            std::fs::read_to_string(layout.meta_dir.join("build_cmd.txt")).unwrap();
+        assert_eq!(content, "cmake");
+    }
+
+    /// find_project_root 在深层嵌套子目录中仍能找到含 .c2rust 的祖先。
+    #[test]
+    fn find_project_root_deep_nesting() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".c2rust")).unwrap();
+        let deep = tmp.path().join("a/b/c/d");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(find_project_root(&deep), tmp.path());
+    }
+
+    /// create_dirs_with_cov_instrumented_does_not_create_cov_obj 验证
+    /// C2RUST_COV_INSTRUMENTED 被设置时不会创建 cov_obj 目录（Case 1）。
+    #[test]
+    fn create_dirs_with_cov_instrumented_does_not_create_cov_obj() {
+        let _g = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        std::env::set_var("C2RUST_COV", "1");
+        std::env::set_var("C2RUST_COV_INSTRUMENTED", "1");
+        let result = layout.create_dirs();
+        std::env::remove_var("C2RUST_COV");
+        std::env::remove_var("C2RUST_COV_INSTRUMENTED");
+        result.unwrap();
+        assert!(
+            !layout.cov_obj_dir.exists(),
+            "cov_obj should NOT be created when C2RUST_COV_INSTRUMENTED is set"
+        );
+    }
 }
