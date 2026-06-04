@@ -103,12 +103,12 @@ fn run_init(args: InitArgs) -> Result<()> {
     // ----------------------------------------------------------------
     // Step 1: build hook library
     // ----------------------------------------------------------------
-    let hook_so = capture::build_hook()?;
+    let hook = capture::build_hook()?;
 
     // ----------------------------------------------------------------
     // Step 2: run build with LD_PRELOAD
     // ----------------------------------------------------------------
-    capture::run_with_hook(&cwd, build_cmd, &project_root, &lo.feature_root, &hook_so)?;
+    capture::run_with_hook(&cwd, build_cmd, &project_root, &lo.feature_root, &hook.path)?;
 
     // ----------------------------------------------------------------
     // Step 2b: optionally pack coverage library

@@ -15,20 +15,30 @@ fn fixture_dir() -> PathBuf {
 }
 
 /// Build the hook library and return its path, or `None` on failure.
+///
+/// Compiles `hook/hook.c` directly with `gcc`; `make` is not required.
 fn build_hook_for_tests() -> Option<PathBuf> {
-    let hook_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hook");
-    if !hook_dir.join("Makefile").exists() {
+    let hook_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("hook")
+        .join("hook.c");
+    if !hook_src.exists() {
         return None;
     }
-    let status = Command::new("make")
-        .arg("-s")
-        .current_dir(&hook_dir)
+    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-hook");
+    std::fs::create_dir_all(&out_dir).ok()?;
+    let so = out_dir.join("libhook.so");
+    let status = Command::new("gcc")
+        .args(["-Wall", "-fPIC", "-shared", "-o"])
+        .arg(&so)
+        .arg(&hook_src)
+        .arg("-ldl")
         .status()
         .ok()?;
     if !status.success() {
         return None;
     }
-    let so = hook_dir.join("libhook.so");
     if so.exists() { Some(so) } else { None }
 }
 
@@ -122,12 +132,6 @@ fn cli_init_custom_feature_writes_meta() {
         eprintln!("Skipping cli_init_custom_feature_writes_meta: missing {}", missing.join(", "));
         return;
     }
-
-    let Some(hook_so) = build_hook_for_tests() else {
-        eprintln!("Skipping cli_init_custom_feature_writes_meta: failed to build libhook.so");
-        return;
-    };
-    let _ = hook_so; // 仅验证 hook 可构建；init 本身会重新构建
 
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = fixture_dir();
