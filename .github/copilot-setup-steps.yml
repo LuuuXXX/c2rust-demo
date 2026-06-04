@@ -1,0 +1,59 @@
+# Copilot coding agent environment setup for c2rust-demo
+#
+# Installs all tools required to:
+#   1. Build and run c2rust-demo (gcc, clang, libclang-dev, bindgen-cli)
+#   2. Measure C-side test coverage (llvm, llvm-tools-preview, cargo-llvm-cov)
+#
+# See: https://docs.github.com/en/copilot/how-tos/use-copilot-agents/copilot-coding-agent/customizing-the-development-environment-for-copilot-coding-agent
+
+steps:
+  # -----------------------------------------------------------------------
+  # System packages: C toolchains and LLVM infrastructure
+  # -----------------------------------------------------------------------
+  - name: Install system dependencies
+    run: |
+      sudo apt-get update -y
+      sudo apt-get install -y \
+        gcc \
+        clang \
+        libclang-dev \
+        llvm \
+        make
+
+  # -----------------------------------------------------------------------
+  # Rust stable toolchain with llvm-tools-preview component
+  # (llvm-tools-preview provides llvm-profdata / llvm-cov used by cargo-llvm-cov)
+  # -----------------------------------------------------------------------
+  - name: Install Rust toolchain
+    uses: dtolnay/rust-toolchain@stable
+    with:
+      toolchain: stable
+      components: llvm-tools-preview
+
+  # -----------------------------------------------------------------------
+  # Cache Cargo registry + build artifacts to speed up repeated runs
+  # -----------------------------------------------------------------------
+  - name: Cache Cargo
+    uses: actions/cache@v4
+    with:
+      path: |
+        ~/.cargo/registry
+        ~/.cargo/git
+        target
+      key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      restore-keys: ${{ runner.os }}-cargo-
+
+  # -----------------------------------------------------------------------
+  # CLI tools needed by c2rust-demo
+  # -----------------------------------------------------------------------
+  - name: Install bindgen-cli
+    run: cargo install bindgen-cli
+
+  - name: Install cargo-llvm-cov
+    run: cargo install cargo-llvm-cov
+
+  # -----------------------------------------------------------------------
+  # Build c2rust-demo itself so the binary is ready for use in tasks
+  # -----------------------------------------------------------------------
+  - name: Build c2rust-demo
+    run: cargo build --release

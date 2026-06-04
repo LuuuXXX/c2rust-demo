@@ -1,0 +1,201 @@
+# C-side Coverage CI via cargo llvm-cov
+#
+# 目的:
+#   验证完整的覆盖率流程:
+#     1. 用 c2rust-demo init --coverage 捕获 C 源码（插入 LLVM 覆盖率标志）
+#     2. 用 c2rust-demo merge 合并生成 Rust FFI 绑定
+#     3. cargo check 验证生成的 Rust 项目可编译
+#     4. cargo llvm-cov 采集 C 侧测试覆盖率数据并生成 lcov 报告
+#
+# 本 workflow 与 scripts/generate-ffi.sh 的逻辑一一对应，
+# 可通过该脚本在本地复现相同流程。
+
+name: coverage-cjson
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  coverage:
+    name: C Coverage via cargo llvm-cov (cJSON)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ----------------------------------------------------------------
+      # 1. 检出 c2rust-demo 仓库
+      # ----------------------------------------------------------------
+      - name: Checkout c2rust-demo
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # 2. 安装系统依赖
+      #    llvm 包含 llvm-profdata / llvm-cov，cargo-llvm-cov 需要。
+      # ----------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc clang libclang-dev llvm make
+
+      # ----------------------------------------------------------------
+      # 3. 安装 Rust 工具链
+      #    llvm-tools-preview 组件为 cargo-llvm-cov 提供 profdata/cov 工具。
+      # ----------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      # ----------------------------------------------------------------
+      # 4. 缓存 Cargo
+      # ----------------------------------------------------------------
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-cov-
+
+      # ----------------------------------------------------------------
+      # 5. 安装 CLI 工具
+      # ----------------------------------------------------------------
+      - name: Install bindgen-cli
+        run: cargo install bindgen-cli
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      # ----------------------------------------------------------------
+      # 6. 构建 c2rust-demo
+      # ----------------------------------------------------------------
+      - name: Build c2rust-demo
+        run: cargo build --release
+
+      # ----------------------------------------------------------------
+      # 7. 克隆 DaveGamble/cJSON
+      # ----------------------------------------------------------------
+      - name: Clone cJSON
+        run: git clone --depth=1 https://github.com/DaveGamble/cJSON.git /tmp/cjson
+
+      # ----------------------------------------------------------------
+      # 8. 运行 c2rust-demo init --coverage
+      #    使用 clang 触发 LLVM 覆盖率标志注入；hook 检测到 clang 后
+      #    在预处理命令中加入 -fprofile-instr-generate -fcoverage-mapping。
+      #    生成的 build.rs 也会在 cargo llvm-cov 时用 clang 重编译 C 源码。
+      # ----------------------------------------------------------------
+      - name: Run c2rust-demo init --coverage
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Running c2rust-demo init --coverage ==="
+          $GITHUB_WORKSPACE/target/release/c2rust-demo init --coverage -- clang -c cJSON.c -I.
+
+      # ----------------------------------------------------------------
+      # 9. 运行 c2rust-demo merge
+      # ----------------------------------------------------------------
+      - name: Run c2rust-demo merge
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Running c2rust-demo merge ==="
+          $GITHUB_WORKSPACE/target/release/c2rust-demo merge
+
+      # ----------------------------------------------------------------
+      # 10. 验证生成结构
+      # ----------------------------------------------------------------
+      - name: Show generated output tree
+        if: always()
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Generated .c2rust directory tree ==="
+          find .c2rust -type f | sort || echo "(no output)"
+          echo ""
+          echo "=== build.rs (coverage instrumentation) ==="
+          cat .c2rust/default/rust/build.rs 2>/dev/null || echo "(no build.rs)"
+          echo ""
+          echo "=== .cargo/config.toml (RUSTC_BOOTSTRAP) ==="
+          cat .c2rust/default/rust/.cargo/config.toml 2>/dev/null || echo "(no config.toml)"
+
+      # ----------------------------------------------------------------
+      # 11. cargo check — 验证生成的 Rust 项目可以编译
+      #     .cargo/config.toml 已自动设置 RUSTC_BOOTSTRAP=1，
+      #     此处显式设置作为保险。
+      # ----------------------------------------------------------------
+      - name: Verify cargo check passes
+        working-directory: /tmp/cjson/.c2rust/default/rust
+        run: |
+          echo "=== Running cargo check ==="
+          RUSTC_BOOTSTRAP=1 cargo check
+
+      # ----------------------------------------------------------------
+      # 12. 写入最小集成测试以产生实际 C 侧执行覆盖率
+      #     调用 cJSON_Version() — 这是 cJSON 中最简单的无副作用函数。
+      # ----------------------------------------------------------------
+      - name: Add minimal C-side integration test
+        working-directory: /tmp/cjson/.c2rust/default/rust
+        run: |
+          # merge 后 src 是指向 src.2 的符号链接，需要 readlink 获取真实路径
+          REAL_SRC="$(readlink -f src)"
+          cat > "$REAL_SRC/coverage_test.rs" << 'RUST_TEST'
+          // Auto-generated by coverage-ci.yml
+          // 调用真实 C 函数，让 cargo llvm-cov 能采集到非零的 C 侧覆盖率数据。
+          #[cfg(test)]
+          mod coverage_test {
+              use std::ffi::CStr;
+              #[test]
+              fn cjson_version_is_non_empty() {
+                  extern "C" {
+                      fn cJSON_Version() -> *const std::os::raw::c_char;
+                  }
+                  let raw = unsafe { cJSON_Version() };
+                  assert!(!raw.is_null(), "cJSON_Version() returned NULL");
+                  let version = unsafe { CStr::from_ptr(raw) }.to_str().unwrap_or("");
+                  assert!(!version.is_empty(), "cJSON_Version() returned empty string");
+              }
+          }
+          RUST_TEST
+
+          # 在 lib.rs 末尾追加 mod 声明（避免重复）
+          LIB_RS="$REAL_SRC/lib.rs"
+          if ! grep -q "mod coverage_test" "$LIB_RS"; then
+              printf '\nmod coverage_test;\n' >> "$LIB_RS"
+          fi
+
+      # ----------------------------------------------------------------
+      # 13. 运行 cargo llvm-cov 采集 C 侧覆盖率
+      #     build.rs 在检测到 CARGO_LLVM_COV 时用 clang +
+      #     -fprofile-instr-generate / -fcoverage-mapping 重编译 cJSON.c，
+      #     测试执行后 llvm-cov 合并 .profraw 数据并生成 lcov 报告。
+      # ----------------------------------------------------------------
+      - name: Run cargo llvm-cov
+        working-directory: /tmp/cjson/.c2rust/default/rust
+        run: |
+          echo "=== Running cargo llvm-cov ==="
+          RUSTC_BOOTSTRAP=1 cargo llvm-cov \
+            --lcov \
+            --output-path coverage.lcov
+          echo ""
+          echo "=== Coverage summary ==="
+          RUSTC_BOOTSTRAP=1 cargo llvm-cov report \
+            --summary-only 2>/dev/null || true
+
+      # ----------------------------------------------------------------
+      # 14. 上传产物
+      # ----------------------------------------------------------------
+      - name: Upload coverage report (lcov)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cjson-coverage-lcov
+          path: /tmp/cjson/.c2rust/default/rust/coverage.lcov
+          if-no-files-found: warn
+
+      - name: Upload .c2rust artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cjson-c2rust-coverage-output
+          path: /tmp/cjson/.c2rust/
+          if-no-files-found: warn
