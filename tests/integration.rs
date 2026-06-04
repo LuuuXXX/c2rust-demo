@@ -7,11 +7,24 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("cjson")
+/// Clone DaveGamble/cJSON from GitHub (--depth=1) into a fresh TempDir.
+///
+/// Returns the TempDir (caller must hold it alive) on success, or `None` if
+/// `git` is unavailable or the clone fails.  Tests should print a skip
+/// message and return early when this returns `None`.
+fn prepare_cjson_project() -> Option<tempfile::TempDir> {
+    if !missing_tools(&["git"]).is_empty() {
+        return None;
+    }
+    let tmp = tempfile::TempDir::new().ok()?;
+    let ok = Command::new("git")
+        .args(["clone", "--depth=1", "https://github.com/DaveGamble/cJSON.git", "."])
+        .current_dir(tmp.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_or(false, |s| s.success());
+    if ok { Some(tmp) } else { None }
 }
 
 /// Build the hook library and return its path, or `None` on failure.
@@ -117,7 +130,7 @@ fn cli_merge_fails_without_init() {
 /// `c2rust-demo init --feature` 应接受自定义 feature 名称并写入 meta/build_cmd.txt。
 #[test]
 fn cli_init_custom_feature_writes_meta() {
-    let missing = missing_tools(&["gcc", "make"]);
+    let missing = missing_tools(&["gcc", "make", "git"]);
     if !missing.is_empty() {
         eprintln!("Skipping cli_init_custom_feature_writes_meta: missing {}", missing.join(", "));
         return;
@@ -129,9 +142,12 @@ fn cli_init_custom_feature_writes_meta() {
     };
     let _ = hook_so; // 仅验证 hook 可构建；init 本身会重新构建
 
+    let Some(cjson_tmp) = prepare_cjson_project() else {
+        eprintln!("Skipping cli_init_custom_feature_writes_meta: failed to clone cJSON from GitHub");
+        return;
+    };
     let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = fixture_dir();
-    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+    let fixture = cjson_tmp.path();
 
     // 使用自定义 feature 名称 "myfeature"
     let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
@@ -142,6 +158,7 @@ fn cli_init_custom_feature_writes_meta() {
             "--",
             "make",
             &format!("-C{}", fixture.display()),
+            "libcjson.a",
         ])
         .status()
         .expect("c2rust-demo init --feature myfeature");
@@ -177,17 +194,20 @@ fn build_capture_generates_c2rust_files() {
         return;
     };
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = fixture_dir();
+    let Some(cjson_tmp) = prepare_cjson_project() else {
+        eprintln!("Skipping build_capture: failed to clone cJSON from GitHub");
+        return;
+    };
+    let fixture = cjson_tmp.path().to_path_buf();
     // C2RUST_PROJECT_ROOT must be an ancestor of the C files being compiled.
-    // We use the fixture directory itself as the project root so the hook
-    // can strip its prefix from the absolute paths of .c files.
+    // We clone cJSON into a TempDir and use it directly as the project root.
     let project_root = fixture.clone();
+    let tmp = tempfile::TempDir::new().unwrap();
     let feature_root = tmp.path().join(".c2rust/default");
     let c_dir = feature_root.join("c");
     std::fs::create_dir_all(&c_dir).unwrap();
 
-    // Clean + build with the hook injected
+    // Clean + build libcjson.a with the hook injected
     let _ = Command::new("make")
         .current_dir(&fixture)
         .arg("clean")
@@ -195,6 +215,7 @@ fn build_capture_generates_c2rust_files() {
 
     let status = Command::new("make")
         .current_dir(&fixture)
+        .arg("libcjson.a")
         .env("LD_PRELOAD", &hook_so)
         .env("C2RUST_PROJECT_ROOT", project_root)
         .env("C2RUST_FEATURE_ROOT", &feature_root)
@@ -222,30 +243,22 @@ fn build_capture_generates_c2rust_files() {
 /// selects all captured files without prompting.
 #[test]
 fn full_init_creates_rust_project() {
-    let missing = missing_tools(&["gcc", "make", "clang", "bindgen"]);
+    let missing = missing_tools(&["gcc", "make", "clang", "bindgen", "git"]);
     if !missing.is_empty() {
         eprintln!("Skipping full_init: missing tools: {}", missing.join(", "));
         return;
     }
 
-    // Copy the fixture into a fresh temp directory so that C2RUST_PROJECT_ROOT
-    // (derived from the working directory) is an ancestor of the C source files
-    // being compiled.  Running `make -C<fixture>` from a different directory
-    // would cause the hook to skip all files because they are not under
-    // C2RUST_PROJECT_ROOT.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let project_root = tmp.path();
-    let fixture = fixture_dir();
+    // Clone cJSON into a fresh TempDir so that C2RUST_PROJECT_ROOT
+    // (derived from the working directory) is an ancestor of the C source
+    // files being compiled.
+    let Some(cjson_tmp) = prepare_cjson_project() else {
+        eprintln!("Skipping full_init: failed to clone cJSON from GitHub");
+        return;
+    };
+    let project_root = cjson_tmp.path();
 
-    // Copy fixture files into the temp directory.  The cjson fixture has
-    // cJSON.c, cJSON.h, and a Makefile directly at the root level.
-    for entry in std::fs::read_dir(&fixture).unwrap().flatten() {
-        if entry.path().is_file() {
-            std::fs::copy(entry.path(), project_root.join(entry.file_name())).unwrap();
-        }
-    }
-
-    // Clean first (operates on the copy)
+    // Clean first
     let _ = Command::new("make")
         .current_dir(project_root)
         .arg("clean")
@@ -253,7 +266,7 @@ fn full_init_creates_rust_project() {
 
     let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
         .current_dir(project_root)
-        .args(["init", "--", "make"])
+        .args(["init", "--", "make", "libcjson.a"])
         .status()
         .expect("c2rust-demo init");
 
@@ -386,19 +399,22 @@ fn collect_recursive_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
 /// coverage artefacts (cov_lib.txt, build.rs).
 #[test]
 fn coverage_no_env_no_artefacts() {
-    let missing = missing_tools(&["gcc", "make", "clang", "bindgen"]);
+    let missing = missing_tools(&["gcc", "make", "clang", "bindgen", "git"]);
     if !missing.is_empty() {
         eprintln!("Skipping coverage_no_env_no_artefacts: missing {}", missing.join(", "));
         return;
     }
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = fixture_dir();
-    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+    let Some(cjson_tmp) = prepare_cjson_project() else {
+        eprintln!("Skipping coverage_no_env_no_artefacts: failed to clone cJSON from GitHub");
+        return;
+    };
+    let project_root = cjson_tmp.path();
+    let _ = Command::new("make").current_dir(project_root).arg("clean").status();
 
     let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
-        .current_dir(tmp.path())
-        .args(["init", "--", "make", &format!("-C{}", fixture.display())])
+        .current_dir(project_root)
+        .args(["init", "--", "make", "libcjson.a"])
         .env_remove("C2RUST_COV")
         .env_remove("C2RUST_COV_INSTRUMENTED")
         .status()
@@ -409,7 +425,7 @@ fn coverage_no_env_no_artefacts() {
         return;
     }
 
-    let feature_root = tmp.path().join(".c2rust/default");
+    let feature_root = project_root.join(".c2rust/default");
     assert!(
         !feature_root.join("meta/cov_lib.txt").exists(),
         "cov_lib.txt should NOT be created when C2RUST_COV is unset"
@@ -423,7 +439,7 @@ fn coverage_no_env_no_artefacts() {
 /// With C2RUST_COV=1 (Case 2), the hook must write .o files into cov_obj/.
 #[test]
 fn coverage_case2_cov_obj_created() {
-    let missing = missing_tools(&["gcc", "make", "clang"]);
+    let missing = missing_tools(&["gcc", "make", "clang", "git"]);
     if !missing.is_empty() {
         eprintln!("Skipping coverage_case2_cov_obj_created: missing {}", missing.join(", "));
         return;
@@ -434,8 +450,12 @@ fn coverage_case2_cov_obj_created() {
         return;
     };
 
+    let Some(cjson_tmp) = prepare_cjson_project() else {
+        eprintln!("Skipping coverage_case2_cov_obj_created: failed to clone cJSON from GitHub");
+        return;
+    };
+    let fixture = cjson_tmp.path().to_path_buf();
     let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = fixture_dir();
     let feature_root = tmp.path().join(".c2rust/default");
     let c_dir = feature_root.join("c");
     let cov_obj_dir = feature_root.join("cov_obj");
@@ -446,6 +466,7 @@ fn coverage_case2_cov_obj_created() {
 
     let status = Command::new("make")
         .current_dir(&fixture)
+        .arg("libcjson.a")
         .env("LD_PRELOAD", &hook_so)
         .env("C2RUST_PROJECT_ROOT", &fixture)
         .env("C2RUST_FEATURE_ROOT", &feature_root)
@@ -468,19 +489,22 @@ fn coverage_case2_cov_obj_created() {
 /// rustc-link-lib directive.
 #[test]
 fn coverage_case2_libcov_and_build_rs() {
-    let missing = missing_tools(&["gcc", "make", "clang", "bindgen", "ar"]);
+    let missing = missing_tools(&["gcc", "make", "clang", "bindgen", "ar", "git"]);
     if !missing.is_empty() {
         eprintln!("Skipping coverage_case2_libcov_and_build_rs: missing {}", missing.join(", "));
         return;
     }
 
-    let tmp = tempfile::TempDir::new().unwrap();
-    let fixture = fixture_dir();
-    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+    let Some(cjson_tmp) = prepare_cjson_project() else {
+        eprintln!("Skipping coverage_case2_libcov_and_build_rs: failed to clone cJSON from GitHub");
+        return;
+    };
+    let project_root = cjson_tmp.path();
+    let _ = Command::new("make").current_dir(project_root).arg("clean").status();
 
     let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
-        .current_dir(tmp.path())
-        .args(["init", "--", "make", &format!("-C{}", fixture.display())])
+        .current_dir(project_root)
+        .args(["init", "--", "make", "libcjson.a"])
         .env("C2RUST_COV", "1")
         .env_remove("C2RUST_COV_INSTRUMENTED")
         .status()
@@ -491,7 +515,7 @@ fn coverage_case2_libcov_and_build_rs() {
         return;
     }
 
-    let feature_root = tmp.path().join(".c2rust/default");
+    let feature_root = project_root.join(".c2rust/default");
 
     // libcov.a should have been packed
     let libcov = feature_root.join("cov/libcov.a");
