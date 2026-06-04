@@ -1,0 +1,219 @@
+# Coverage report for c2rust-demo exercised against DaveGamble/cJSON
+#
+# Purpose: Run c2rust-demo (init + merge) against the real-world cJSON project
+#          using cargo-llvm-cov instrumentation, so that every line of
+#          c2rust-demo that is exercised by the real workflow is counted.
+#          A summary table and an lcov report are produced as artefacts.
+#
+# Flow mirrors validate-cjson.yml but replaces the pre-built release binary
+# with a coverage-instrumented binary via `cargo llvm-cov run`.
+
+name: cjson-coverage
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  coverage:
+    name: Coverage — c2rust-demo vs cJSON
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Check out c2rust-demo
+      # ------------------------------------------------------------------
+      - name: Checkout c2rust-demo
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 2. System dependencies (gcc, clang, libclang-dev)
+      # ------------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc clang libclang-dev
+
+      # ------------------------------------------------------------------
+      # 3. Rust toolchain with llvm-tools-preview (required by llvm-cov)
+      # ------------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      # ------------------------------------------------------------------
+      # 4. Cache Cargo registry + build artefacts
+      # ------------------------------------------------------------------
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-cov-
+
+      # ------------------------------------------------------------------
+      # 5. Install bindgen-cli (required by c2rust-demo init)
+      # ------------------------------------------------------------------
+      - name: Install bindgen-cli
+        run: cargo install bindgen-cli
+
+      # ------------------------------------------------------------------
+      # 6. Install cargo-llvm-cov
+      # ------------------------------------------------------------------
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      # ------------------------------------------------------------------
+      # 7. Clone DaveGamble/cJSON
+      # ------------------------------------------------------------------
+      - name: Clone cJSON
+        run: git clone --depth=1 https://github.com/DaveGamble/cJSON.git /tmp/cjson
+
+      # ------------------------------------------------------------------
+      # 8. Run c2rust-demo init with coverage instrumentation
+      #    `cargo llvm-cov run --no-report` builds the binary with LLVM
+      #    coverage instrumentation, runs it, and saves the raw profile
+      #    data without generating a report yet.
+      # ------------------------------------------------------------------
+      - name: Run c2rust-demo init (instrumented)
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Running c2rust-demo init (with coverage) ==="
+          cargo llvm-cov run \
+            --manifest-path $GITHUB_WORKSPACE/Cargo.toml \
+            --no-report \
+            -- init -- gcc -c cJSON.c -I.
+
+      # ------------------------------------------------------------------
+      # 9. Validate init output (same assertions as validate-cjson.yml)
+      # ------------------------------------------------------------------
+      - name: Validate init output
+        working-directory: /tmp/cjson
+        run: |
+          FEATURE_ROOT=".c2rust/default"
+          PASS=0; FAIL=0
+
+          check_exists() {
+            if [ -e "$1" ] || [ -L "$1" ]; then
+              echo "  [PASS] $2"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $2 -- NOT FOUND: $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_contains() {
+            if [ -f "$1" ] && grep -qF "$2" "$1"; then
+              echo "  [PASS] $3"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $3 -- '$2' not in $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_exists "$FEATURE_ROOT"                               "feature root .c2rust/default/"
+          check_exists "$FEATURE_ROOT/meta/build_cmd.txt"            "meta/build_cmd.txt"
+          check_contains "$FEATURE_ROOT/meta/build_cmd.txt" "gcc"    "build_cmd.txt mentions gcc"
+          check_exists "$FEATURE_ROOT/meta/selected_files.json"      "meta/selected_files.json"
+          check_exists "$FEATURE_ROOT/meta/init-interface-report.md" "meta/init-interface-report.md"
+          check_exists "$FEATURE_ROOT/rust/Cargo.toml"               "rust/Cargo.toml"
+          check_exists "$FEATURE_ROOT/rust/src/lib.rs"               "rust/src/lib.rs"
+          check_exists "$FEATURE_ROOT/rust/src/lib.normalized"       "rust/src/lib.normalized"
+
+          if find "$FEATURE_ROOT/c" -name "*.c2rust" | grep -q .; then
+            echo "  [PASS] at least one .c2rust capture file"; PASS=$((PASS+1))
+          else
+            echo "  [FAIL] no .c2rust capture files found in $FEATURE_ROOT/c/"; FAIL=$((FAIL+1))
+          fi
+
+          if find "$FEATURE_ROOT/rust/src" -maxdepth 1 -type d -name "mod_*" | grep -q .; then
+            echo "  [PASS] at least one mod_* directory under rust/src/"; PASS=$((PASS+1))
+          else
+            echo "  [FAIL] no mod_* directories found under rust/src/"; FAIL=$((FAIL+1))
+          fi
+
+          echo ""
+          echo "Init validation: $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+      # ------------------------------------------------------------------
+      # 10. Run c2rust-demo merge with coverage instrumentation
+      # ------------------------------------------------------------------
+      - name: Run c2rust-demo merge (instrumented)
+        working-directory: /tmp/cjson
+        run: |
+          echo "=== Running c2rust-demo merge (with coverage) ==="
+          cargo llvm-cov run \
+            --manifest-path $GITHUB_WORKSPACE/Cargo.toml \
+            --no-report \
+            -- merge
+
+      # ------------------------------------------------------------------
+      # 11. Validate merge output (same assertions as validate-cjson.yml)
+      # ------------------------------------------------------------------
+      - name: Validate merge output
+        working-directory: /tmp/cjson
+        run: |
+          FEATURE_ROOT=".c2rust/default"
+          PASS=0; FAIL=0
+
+          check_exists() {
+            if [ -e "$1" ] || [ -L "$1" ]; then
+              echo "  [PASS] $2"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $2 -- NOT FOUND: $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_symlink() {
+            if [ -L "$1" ]; then
+              echo "  [PASS] $2 (symlink)"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $2 -- expected symlink at $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_exists  "$FEATURE_ROOT/rust/src.1"                      "rust/src.1/ (init backup)"
+          check_exists  "$FEATURE_ROOT/rust/src.2"                      "rust/src.2/ (merged output)"
+          check_symlink "$FEATURE_ROOT/rust/src"                        "rust/src -> src.2 symlink"
+          check_exists  "$FEATURE_ROOT/rust/src.2/lib.rs"               "rust/src.2/lib.rs"
+          check_exists  "$FEATURE_ROOT/meta/merge-interface-report.md"  "meta/merge-interface-report.md"
+
+          if find "$FEATURE_ROOT/rust/src.2" -name "*.rs" | grep -q .; then
+            rs_count=$(find "$FEATURE_ROOT/rust/src.2" -name "*.rs" | wc -l)
+            echo "  [PASS] src.2/ contains $rs_count .rs file(s)"; PASS=$((PASS+1))
+          else
+            echo "  [FAIL] src.2/ contains no .rs files"; FAIL=$((FAIL+1))
+          fi
+
+          echo ""
+          echo "Merge validation: $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+      # ------------------------------------------------------------------
+      # 12. Generate coverage report
+      #     Merges the profile data from both init and merge runs into a
+      #     single report.  Both a human-readable summary and an lcov file
+      #     are produced.
+      # ------------------------------------------------------------------
+      - name: Generate coverage report (summary)
+        run: |
+          echo "=== Coverage summary: c2rust-demo exercised by cJSON workflow ==="
+          cargo llvm-cov report --summary-only
+
+      - name: Generate coverage report (lcov)
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
+      # ------------------------------------------------------------------
+      # 13. Upload lcov report as a build artefact
+      # ------------------------------------------------------------------
+      - name: Upload lcov coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cjson-coverage-lcov
+          path: lcov.info
+          if-no-files-found: warn
