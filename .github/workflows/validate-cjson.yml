@@ -1,13 +1,12 @@
 # Validate c2rust-demo against DaveGamble/cJSON
 #
-# Purpose: This workflow exists *primarily for validation visibility*.
-#          It runs on every push/PR so we can see whether c2rust-demo
-#          (init + merge) actually works against a real-world C project
-#          (DaveGamble/cJSON).  It is intentionally not gated; we want
-#          a clear pass/fail signal in the Actions log.
+# Purpose: Run c2rust-demo (init + merge) against the real-world cJSON project
+#          and assert that all expected outputs are produced and correct.
+#          The workflow fails if any assertion fails, giving a clear pass/fail
+#          signal on every push and pull request.
 #
-# The workflow mirrors scripts/validate-cjson.sh and can be reproduced
-# locally by running that script.
+# The same validation can be reproduced locally with:
+#   ./scripts/validate-cjson.sh
 
 name: validate-cjson
 
@@ -86,7 +85,60 @@ jobs:
           $GITHUB_WORKSPACE/target/release/c2rust-demo init -- gcc -c cJSON.c -I.
 
       # ------------------------------------------------------------------
-      # 9. Run c2rust-demo merge
+      # 9. Validate init output
+      #    Assert that the expected files and directories were produced.
+      # ------------------------------------------------------------------
+      - name: Validate init output
+        working-directory: /tmp/cjson
+        run: |
+          FEATURE_ROOT=".c2rust/default"
+          PASS=0; FAIL=0
+
+          check_exists() {
+            if [ -e "$1" ] || [ -L "$1" ]; then
+              echo "  [PASS] $2"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $2 -- NOT FOUND: $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_contains() {
+            if [ -f "$1" ] && grep -qF "$2" "$1"; then
+              echo "  [PASS] $3"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $3 -- '$2' not in $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_exists "$FEATURE_ROOT"                               "feature root .c2rust/default/"
+          check_exists "$FEATURE_ROOT/meta/build_cmd.txt"            "meta/build_cmd.txt"
+          check_contains "$FEATURE_ROOT/meta/build_cmd.txt" "gcc"    "build_cmd.txt mentions gcc"
+          check_exists "$FEATURE_ROOT/meta/selected_files.json"      "meta/selected_files.json"
+          check_exists "$FEATURE_ROOT/meta/init-interface-report.md" "meta/init-interface-report.md"
+          check_exists "$FEATURE_ROOT/rust/Cargo.toml"               "rust/Cargo.toml"
+          check_exists "$FEATURE_ROOT/rust/src/lib.rs"               "rust/src/lib.rs"
+          check_exists "$FEATURE_ROOT/rust/src/lib.normalized"       "rust/src/lib.normalized"
+
+          # At least one .c2rust capture file
+          if find "$FEATURE_ROOT/c" -name "*.c2rust" | grep -q .; then
+            echo "  [PASS] at least one .c2rust capture file"; PASS=$((PASS+1))
+          else
+            echo "  [FAIL] no .c2rust capture files found in $FEATURE_ROOT/c/"; FAIL=$((FAIL+1))
+          fi
+
+          # At least one mod_* directory under rust/src/
+          if find "$FEATURE_ROOT/rust/src" -maxdepth 1 -type d -name "mod_*" | grep -q .; then
+            echo "  [PASS] at least one mod_* directory under rust/src/"; PASS=$((PASS+1))
+          else
+            echo "  [FAIL] no mod_* directories found under rust/src/"; FAIL=$((FAIL+1))
+          fi
+
+          echo ""
+          echo "Init validation: $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+      # ------------------------------------------------------------------
+      # 10. Run c2rust-demo merge
       # ------------------------------------------------------------------
       - name: Run c2rust-demo merge
         working-directory: /tmp/cjson
@@ -95,7 +147,60 @@ jobs:
           $GITHUB_WORKSPACE/target/release/c2rust-demo merge
 
       # ------------------------------------------------------------------
-      # 10. Print the generated output tree so it is visible in the log
+      # 11. Validate merge output
+      #     Assert symlink, backup, src.2 contents, and report file.
+      # ------------------------------------------------------------------
+      - name: Validate merge output
+        working-directory: /tmp/cjson
+        run: |
+          FEATURE_ROOT=".c2rust/default"
+          PASS=0; FAIL=0
+
+          check_exists() {
+            if [ -e "$1" ] || [ -L "$1" ]; then
+              echo "  [PASS] $2"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $2 -- NOT FOUND: $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_symlink() {
+            if [ -L "$1" ]; then
+              echo "  [PASS] $2 (symlink)"; PASS=$((PASS+1))
+            else
+              echo "  [FAIL] $2 -- expected symlink at $1"; FAIL=$((FAIL+1))
+            fi
+          }
+
+          check_exists  "$FEATURE_ROOT/rust/src.1"                        "rust/src.1/ (init backup)"
+          check_exists  "$FEATURE_ROOT/rust/src.2"                        "rust/src.2/ (merged output)"
+          check_symlink "$FEATURE_ROOT/rust/src"                          "rust/src -> src.2 symlink"
+          check_exists  "$FEATURE_ROOT/rust/src.2/lib.rs"                 "rust/src.2/lib.rs"
+          check_exists  "$FEATURE_ROOT/meta/merge-interface-report.md"    "meta/merge-interface-report.md"
+
+          # src.2 must contain at least one .rs file
+          if find "$FEATURE_ROOT/rust/src.2" -name "*.rs" | grep -q .; then
+            rs_count=$(find "$FEATURE_ROOT/rust/src.2" -name "*.rs" | wc -l)
+            echo "  [PASS] src.2/ contains $rs_count .rs file(s)"; PASS=$((PASS+1))
+          else
+            echo "  [FAIL] src.2/ contains no .rs files"; FAIL=$((FAIL+1))
+          fi
+
+          echo ""
+          echo "Merge validation: $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+      # ------------------------------------------------------------------
+      # 12. cargo check the generated Rust project
+      #     Verifies that the generated code is syntactically valid Rust.
+      # ------------------------------------------------------------------
+      - name: cargo check generated Rust project
+        run: |
+          echo "=== cargo check on generated Rust project ==="
+          cargo check --manifest-path /tmp/cjson/.c2rust/default/rust/Cargo.toml
+
+      # ------------------------------------------------------------------
+      # 13. Print the generated output tree so it is visible in the log
       # ------------------------------------------------------------------
       - name: Show generated output tree
         if: always()
@@ -105,11 +210,14 @@ jobs:
           find .c2rust -type f | sort || echo "(no .c2rust output found)"
           echo ""
           echo "=== Contents of .c2rust/default/meta/ ==="
-          cat .c2rust/default/meta/build_cmd.txt      2>/dev/null || true
-          cat .c2rust/default/meta/selected_files.json 2>/dev/null || true
+          cat .c2rust/default/meta/build_cmd.txt           2>/dev/null || true
+          cat .c2rust/default/meta/selected_files.json     2>/dev/null || true
+          echo ""
+          echo "=== merge-interface-report.md ==="
+          cat .c2rust/default/meta/merge-interface-report.md 2>/dev/null || true
 
       # ------------------------------------------------------------------
-      # 11. Upload the entire .c2rust/ tree as a build artifact
+      # 14. Upload the entire .c2rust/ tree as a build artifact
       #     (available for download from the Actions run page)
       # ------------------------------------------------------------------
       - name: Upload .c2rust artifact
