@@ -33,14 +33,17 @@ C 项目目录
 ## 项目结构（关键文件）
 
 - `src/main.rs`：CLI 入口（`init` / `merge`）
-- `src/capture.rs`：hook 构建与带环境变量的构建命令执行
+- `src/capture.rs`：hook 构建与带环境变量的构建命令执行（`hook_dir()` 支持 `cargo llvm-cov` 的 `target/llvm-cov-target/` 路径布局）
 - `src/layout.rs`：`.c2rust/<feature>/` 目录与元数据管理
 - `src/selector.rs`：交互式文件选择（`dialoguer`）
 - `src/split/feature.rs`：`init` 阶段 Rust 脚手架与报告生成
 - `src/split/merge.rs`：`merge` 阶段合并、FFI 去重与报告生成
 - `hook/`：`libhook.so` 源码与 Makefile
-- `tests/`：单元测试 + 集成测试
+- `tests/integration.rs`：集成测试（自动检测外部工具，缺失则跳过）
+- `tests/fixtures/simple/`：包含两个 C 文件的最小 C 项目，用于集成测试
+- `tests/fixtures/cov-demo/`：带 LLVM 覆盖率插桩的独立 Cargo 项目，用于验证 C+Rust 联合覆盖率工作流
 - `scripts/validate-cjson.sh`：对 cJSON 的端到端验证脚本（与 CI 对齐）
+- `.github/workflows/`：CI 工作流（见下文"持续集成"章节）
 
 ## 环境要求
 
@@ -159,11 +162,35 @@ cargo test --test integration
 
 集成测试会自动检测外部工具（如 `gcc`、`make`、`clang`、`bindgen`），缺失时打印跳过信息。
 
+运行 c2rust-demo 自身的测试覆盖率（Rust + 内置 C fixture）：
+
+```bash
+# 安装 cargo-llvm-cov（需要 llvm-tools-preview 组件）
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+
+# 生成覆盖率摘要
+cargo llvm-cov --summary-only -- --test-threads=1
+
+# 验证 C 代码覆盖率工作流（tests/fixtures/cov-demo 包含插桩 C 源码）
+cargo llvm-cov --manifest-path tests/fixtures/cov-demo/Cargo.toml --summary-only
+```
+
 可在本地执行 cJSON 验证脚本：
 
 ```bash
 ./scripts/validate-cjson.sh
 ```
+
+## 持续集成
+
+仓库包含三个 GitHub Actions 工作流：
+
+| 工作流文件 | 触发时机 | 主要内容 |
+|---|---|---|
+| `.github/workflows/ci.yml` | push / PR | `cargo build` + `cargo test`（含集成测试）+ `cargo llvm-cov` 自测覆盖率 + 验证 `tests/fixtures/cov-demo` C 覆盖率 |
+| `.github/workflows/validate-cjson.yml` | push / PR | 在 CI 环境中克隆 cJSON 并完整运行 `init` + `merge`，断言所有预期输出均存在 |
+| `.github/workflows/cjson-coverage.yml` | push / PR | 用 `cargo llvm-cov run` 对真实 cJSON 项目执行完整工作流，生成 c2rust-demo 自身的覆盖率报告（lcov + HTML） |
 
 ## 可选环境变量
 
