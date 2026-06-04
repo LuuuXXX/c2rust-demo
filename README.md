@@ -172,6 +172,52 @@ cargo test --test integration
 - `C2RUST_CC`：hook 识别的编译器名称（默认自动匹配 `gcc/clang/cc` 及带版本后缀）
 - `C2RUST_LD`：hook 识别的链接器名称（默认自动匹配 `ld/lld`）
 - `C2RUST_DEBUG`：设为非空时输出 hook 调试日志到 stderr
+- `C2RUST_COV`：设为非空时启用 C 侧测试覆盖率插桩（Case 2：自动用 clang 编译带插桩的 .o）
+- `C2RUST_COV_INSTRUMENTED`：与 `C2RUST_COV` 同时设置时表示 Case 1（C 构建系统已自行插桩），hook 只收集 .a 路径，不重复编译
+
+## 测试覆盖率（C + Rust 联合）
+
+`cargo llvm-cov` 可统一采集 Rust 和 C 代码的覆盖率数据，前提是 C 代码用 clang 的 LLVM 插桩方式编译。
+
+### 依赖
+
+```bash
+cargo install cargo-llvm-cov   # 需要 LLVM/clang 工具链
+which clang ar                  # 必须在 PATH 中
+```
+
+### Case 1：C 构建系统已支持 LLVM 插桩
+
+如果你的 C 构建系统（如 CMake）可以通过某个选项使 clang 以 `-fprofile-instr-generate -fcoverage-mapping` 编译，只需在运行 `init` 时同时设置两个变量，工具会从 hook 捕获的链接目标列表中自动提取 `.a` 路径：
+
+```bash
+C2RUST_COV=1 C2RUST_COV_INSTRUMENTED=1 c2rust-demo init -- <你的构建命令>
+```
+
+### Case 2：C 构建系统不支持插桩（默认自动插桩）
+
+只设置 `C2RUST_COV=1`，hook 会在截获每次编译调用时额外 fork 一个 clang 进程，用 LLVM 插桩方式再编译一次，产物写入 `.c2rust/<feature>/cov_obj/`，init 完成后打包为 `libcov.a`：
+
+```bash
+C2RUST_COV=1 c2rust-demo init -- <你的构建命令>
+```
+
+两种 Case 完成后，`init` 会在生成的 Rust 项目中自动写入 `rust/build.rs`，链接插桩的 `libcov.a`，并在 `rust/Cargo.toml` 中注册 `build = "build.rs"`。
+
+### 运行覆盖率
+
+```bash
+cd .c2rust/<feature>/rust
+LLVM_PROFILE_FILE="cov-%p-%m.profraw" cargo llvm-cov --lcov --output-path lcov.info
+```
+
+查看 HTML 报告：
+
+```bash
+cargo llvm-cov report --html
+```
+
+> **说明**：`LLVM_PROFILE_FILE` 可控制 `.profraw` 文件的存放路径。C 侧函数的覆盖数据包含在同一份 profraw 中，`llvm-cov` 会一并展示。
 
 ## 注意事项
 

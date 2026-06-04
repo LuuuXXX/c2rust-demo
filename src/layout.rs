@@ -31,6 +31,10 @@ pub struct FeatureLayout {
     pub rust_dir: PathBuf,
     /// `.c2rust/<feature>/meta/`
     pub meta_dir: PathBuf,
+    /// `.c2rust/<feature>/cov_obj/`  (used when C2RUST_COV=1 without C2RUST_COV_INSTRUMENTED)
+    pub cov_obj_dir: PathBuf,
+    /// `.c2rust/<feature>/cov/`  (contains libcov.a packed from cov_obj/)
+    pub cov_dir: PathBuf,
 }
 
 impl FeatureLayout {
@@ -40,6 +44,8 @@ impl FeatureLayout {
             c_dir: feature_root.join("c"),
             rust_dir: feature_root.join("rust"),
             meta_dir: feature_root.join("meta"),
+            cov_obj_dir: feature_root.join("cov_obj"),
+            cov_dir: feature_root.join("cov"),
             feature_root,
             project_root,
             feature_name: feature_name.to_string(),
@@ -47,12 +53,42 @@ impl FeatureLayout {
     }
 
     /// Create all required directories.
+    /// When `C2RUST_COV` is set and `C2RUST_COV_INSTRUMENTED` is not set,
+    /// also creates `cov_obj/` for the hook to write instrumented objects into.
     pub fn create_dirs(&self) -> Result<()> {
         for dir in [&self.c_dir, &self.rust_dir, &self.meta_dir] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| anyhow!("create dir {}: {}", dir.display(), e))?;
         }
+        let cov_enabled = std::env::var_os("C2RUST_COV").is_some_and(|v| !v.is_empty());
+        let already_instrumented =
+            std::env::var_os("C2RUST_COV_INSTRUMENTED").is_some_and(|v| !v.is_empty());
+        if cov_enabled && !already_instrumented {
+            std::fs::create_dir_all(&self.cov_obj_dir)
+                .map_err(|e| anyhow!("create dir {}: {}", self.cov_obj_dir.display(), e))?;
+        }
         Ok(())
+    }
+
+    /// Absolute path to the packed coverage library: `.c2rust/<feature>/cov/libcov.a`.
+    pub fn cov_lib_path(&self) -> PathBuf {
+        self.cov_dir.join("libcov.a")
+    }
+
+    /// Write `meta/cov_lib.txt` with the absolute path of the coverage library.
+    pub fn save_cov_lib_path(&self, lib: &Path) -> Result<()> {
+        let path = self.meta_dir.join("cov_lib.txt");
+        std::fs::write(&path, lib.display().to_string())
+            .map_err(|e| anyhow!("write {}: {}", path.display(), e))
+    }
+
+    /// Read `meta/cov_lib.txt` and return the coverage library path, if it exists.
+    pub fn read_cov_lib_path(&self) -> Option<PathBuf> {
+        let path = self.meta_dir.join("cov_lib.txt");
+        std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| !p.as_os_str().is_empty())
     }
 
     /// Write `meta/build_cmd.txt`.
@@ -100,6 +136,12 @@ fn visit_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_utils::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn find_project_root_in_current_dir() {
@@ -172,5 +214,67 @@ mod tests {
         let files = scan_c2rust_files(tmp.path()).unwrap();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.c2rust"));
+    }
+
+    #[test]
+    fn cov_obj_dir_path_is_correct() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "myfeature");
+        assert_eq!(
+            layout.cov_obj_dir,
+            tmp.path().join(".c2rust/myfeature/cov_obj")
+        );
+    }
+
+    #[test]
+    fn cov_lib_path_is_correct() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "myfeature");
+        assert_eq!(
+            layout.cov_lib_path(),
+            tmp.path().join(".c2rust/myfeature/cov/libcov.a")
+        );
+    }
+
+    #[test]
+    fn save_and_read_cov_lib_path_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        layout.create_dirs().unwrap();
+        let lib = PathBuf::from("/some/path/libcov.a");
+        layout.save_cov_lib_path(&lib).unwrap();
+        let roundtrip = layout.read_cov_lib_path().expect("should have cov_lib.txt");
+        assert_eq!(roundtrip, lib);
+    }
+
+    #[test]
+    fn read_cov_lib_path_returns_none_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        layout.create_dirs().unwrap();
+        assert!(layout.read_cov_lib_path().is_none());
+    }
+
+    #[test]
+    fn create_dirs_with_cov_creates_cov_obj() {
+        let _g = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        std::env::set_var("C2RUST_COV", "1");
+        std::env::remove_var("C2RUST_COV_INSTRUMENTED");
+        let result = layout.create_dirs();
+        std::env::remove_var("C2RUST_COV");
+        result.unwrap();
+        assert!(layout.cov_obj_dir.exists());
+    }
+
+    #[test]
+    fn create_dirs_without_cov_no_cov_obj() {
+        let _g = env_lock();
+        let tmp = TempDir::new().unwrap();
+        let layout = FeatureLayout::new(tmp.path().to_path_buf(), "default");
+        std::env::remove_var("C2RUST_COV");
+        layout.create_dirs().unwrap();
+        assert!(!layout.cov_obj_dir.exists());
     }
 }

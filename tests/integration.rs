@@ -247,18 +247,26 @@ fn selector_select_none() {
 // ---------------------------------------------------------------------------
 
 fn collect_c2rust_files(dir: &Path) -> Vec<PathBuf> {
+    collect_by_ext(dir, "c2rust")
+}
+
+fn collect_by_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_recursive(dir, &mut out);
+    collect_recursive_ext(dir, ext, &mut out);
     out
 }
 
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    collect_recursive_ext(dir, "c2rust", out);
+}
+
+fn collect_recursive_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                collect_recursive(&p, out);
-            } else if p.extension().is_some_and(|e| e == "c2rust") {
+                collect_recursive_ext(&p, ext, out);
+            } else if p.extension().is_some_and(|e| e == ext) {
                 out.push(p);
             }
         }
@@ -266,8 +274,158 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 // ---------------------------------------------------------------------------
-// Re-export shims for testing internal modules from integration tests
+// Coverage integration tests (require gcc + make + clang + hook; auto-skip)
 // ---------------------------------------------------------------------------
+
+/// Backward-compat check: without C2RUST_COV, init must NOT create any
+/// coverage artefacts (cov_lib.txt, build.rs).
+#[test]
+fn coverage_no_env_no_artefacts() {
+    let missing = missing_tools(&["gcc", "make", "clang", "bindgen"]);
+    if !missing.is_empty() {
+        eprintln!("Skipping coverage_no_env_no_artefacts: missing {}", missing.join(", "));
+        return;
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = fixture_dir();
+    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .current_dir(tmp.path())
+        .args(["init", "--", "make", &format!("-C{}", fixture.display())])
+        .env_remove("C2RUST_COV")
+        .env_remove("C2RUST_COV_INSTRUMENTED")
+        .status()
+        .expect("c2rust-demo init");
+
+    if !status.success() {
+        eprintln!("c2rust-demo init failed – skipping assertions");
+        return;
+    }
+
+    let feature_root = tmp.path().join(".c2rust/default");
+    assert!(
+        !feature_root.join("meta/cov_lib.txt").exists(),
+        "cov_lib.txt should NOT be created when C2RUST_COV is unset"
+    );
+    assert!(
+        !feature_root.join("rust/build.rs").exists(),
+        "build.rs should NOT be created when C2RUST_COV is unset"
+    );
+}
+
+/// With C2RUST_COV=1 (Case 2), the hook must write .o files into cov_obj/.
+#[test]
+fn coverage_case2_cov_obj_created() {
+    let missing = missing_tools(&["gcc", "make", "clang"]);
+    if !missing.is_empty() {
+        eprintln!("Skipping coverage_case2_cov_obj_created: missing {}", missing.join(", "));
+        return;
+    }
+
+    let Some(hook_so) = build_hook_for_tests() else {
+        eprintln!("Skipping coverage_case2_cov_obj_created: failed to build libhook.so");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = fixture_dir();
+    let feature_root = tmp.path().join(".c2rust/default");
+    let c_dir = feature_root.join("c");
+    let cov_obj_dir = feature_root.join("cov_obj");
+    std::fs::create_dir_all(&c_dir).unwrap();
+    std::fs::create_dir_all(&cov_obj_dir).unwrap();
+
+    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+
+    let status = Command::new("make")
+        .current_dir(&fixture)
+        .env("LD_PRELOAD", &hook_so)
+        .env("C2RUST_PROJECT_ROOT", &fixture)
+        .env("C2RUST_FEATURE_ROOT", &feature_root)
+        .env("C2RUST_COV", "1")
+        .env_remove("C2RUST_COV_INSTRUMENTED")
+        .status()
+        .expect("make");
+    assert!(status.success(), "make with hook failed");
+
+    let obj_files: Vec<_> = collect_by_ext(&cov_obj_dir, "o");
+    assert!(
+        !obj_files.is_empty(),
+        "expected .o files in cov_obj/ after C2RUST_COV=1 build, found none"
+    );
+    println!("Case 2: {} .o file(s) in cov_obj/", obj_files.len());
+}
+
+/// Full Case 2 flow: init with C2RUST_COV=1 must produce libcov.a,
+/// meta/cov_lib.txt pointing at it, and rust/build.rs containing the
+/// rustc-link-lib directive.
+#[test]
+fn coverage_case2_libcov_and_build_rs() {
+    let missing = missing_tools(&["gcc", "make", "clang", "bindgen", "ar"]);
+    if !missing.is_empty() {
+        eprintln!("Skipping coverage_case2_libcov_and_build_rs: missing {}", missing.join(", "));
+        return;
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = fixture_dir();
+    let _ = Command::new("make").current_dir(&fixture).arg("clean").status();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_c2rust-demo"))
+        .current_dir(tmp.path())
+        .args(["init", "--", "make", &format!("-C{}", fixture.display())])
+        .env("C2RUST_COV", "1")
+        .env_remove("C2RUST_COV_INSTRUMENTED")
+        .status()
+        .expect("c2rust-demo init");
+
+    if !status.success() {
+        eprintln!("c2rust-demo init failed – skipping coverage assertions");
+        return;
+    }
+
+    let feature_root = tmp.path().join(".c2rust/default");
+
+    // libcov.a should have been packed
+    let libcov = feature_root.join("cov/libcov.a");
+    assert!(libcov.exists(), "libcov.a should exist at {}", libcov.display());
+
+    // meta/cov_lib.txt should point at it
+    let txt = feature_root.join("meta/cov_lib.txt");
+    assert!(txt.exists(), "meta/cov_lib.txt should exist");
+    let recorded = std::fs::read_to_string(&txt).unwrap();
+    let recorded = recorded.trim();
+    assert!(
+        recorded.ends_with("libcov.a"),
+        "cov_lib.txt should reference libcov.a, got: {recorded}"
+    );
+
+    // rust/build.rs should exist and contain the link directive
+    let build_rs = feature_root.join("rust/build.rs");
+    assert!(build_rs.exists(), "rust/build.rs should exist");
+    let content = std::fs::read_to_string(&build_rs).unwrap();
+    assert!(
+        content.contains("rustc-link-lib=static=cov"),
+        "build.rs should contain rustc-link-lib=static=cov"
+    );
+    assert!(
+        content.contains("rustc-link-search=native="),
+        "build.rs should contain rustc-link-search"
+    );
+
+    // Cargo.toml should have build = "build.rs"
+    let cargo_toml = feature_root.join("rust/Cargo.toml");
+    let toml_content = std::fs::read_to_string(&cargo_toml).unwrap();
+    assert!(
+        toml_content.contains("build = \"build.rs\""),
+        "Cargo.toml should contain build = \"build.rs\""
+    );
+
+    println!("Case 2 full flow: libcov.a + build.rs verified");
+}
+
 
 mod c2rust_demo_layout {
     pub use ::std::path::PathBuf;

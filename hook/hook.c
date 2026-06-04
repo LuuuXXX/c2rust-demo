@@ -4,6 +4,9 @@
  * 2. C2RUST_FEATURE_ROOT: 构建的每个target都对应一个Feature, 必须存在
  * 3. C2RUST_CC: 编译程序的名字，如果不指定，则为gcc/clang/cc之一.
  * 4. C2RUST_DEBUG: 设置为1时将调试信息输出到stderr.
+ * 5. C2RUST_COV: 设置为非空时启用测试覆盖率插桩模式.
+ * 6. C2RUST_COV_INSTRUMENTED: 与C2RUST_COV同时设置时，表示构建命令已自带插桩（跳过自动插桩），
+ *    此时从链接器捕获的.a路径写入cov_targets.list供后续使用.
 */
 
 #define _GNU_SOURCE
@@ -29,6 +32,8 @@ static const char* C2RUST_LD = "C2RUST_LD";
 static const char* C2RUST_CC_SKIP = "C2RUST_CC_SKIP";
 static const char* C2RUST_LD_SKIP = "C2RUST_LD_SKIP";
 static const char* C2RUST_DEBUG_ENV = "C2RUST_DEBUG";
+static const char* C2RUST_COV = "C2RUST_COV";
+static const char* C2RUST_COV_INSTRUMENTED = "C2RUST_COV_INSTRUMENTED";
 
 static const char* cc_names[] = {"gcc", "clang", "cc"};
 static const char* ld_names[] = {"ld", "lld"};
@@ -322,8 +327,80 @@ static void preprocess_cfile(const char* cc, int argc, char* argv[], const char*
         }
 }
 
+/*
+ * Compile a single C file with LLVM coverage instrumentation flags using clang.
+ *
+ * The object file is written to <feature_root>/cov_obj/<rel_path>.o, where
+ * <rel_path> is the path of cfile relative to project_root with the .c
+ * extension replaced by .o.
+ *
+ * This is called from discover_cfile() when C2RUST_COV is set and
+ * C2RUST_COV_INSTRUMENTED is not set (Case 2: automatic instrumentation).
+ * By the time this function is called, C2RUST_CC_SKIP is already set in the
+ * environment, so the child clang process will not re-enter discover_cfile().
+ */
+static void compile_with_coverage(int argc, char* argv[], const char* cfile, const char* project_root, const char* feature_root) {
+        const char* path = strip_prefix(cfile, project_root);
+        if (!path) {
+                DBG("compile_with_coverage: skipping %s (not under %s)\n", cfile, project_root);
+                return;
+        }
+
+        /* Build output path: <feature_root>/cov_obj/<rel_path_without_ext>.o */
+        int path_len = (int)strlen(path);
+        /* path ends with ".c" (guaranteed by is_cfile), strip last 2 chars and append ".o" */
+        char obj_rel[MAX_PATH_LEN];
+        if (path_len < 3) return;
+        int base_len = snprintf(obj_rel, sizeof(obj_rel), "%.*s.o", path_len - 2, path);
+        if (base_len >= (int)sizeof(obj_rel)) return;
+
+        char full_path[MAX_PATH_LEN];
+        int full_path_len = snprintf(full_path, sizeof(full_path), "%s/cov_obj/%s", feature_root, obj_rel);
+        if (full_path_len >= (int)sizeof(full_path)) return;
+
+        /* Create the directory holding the output object */
+        char* last_slash = strrchr(full_path, '/');
+        if (!last_slash) return;
+        *last_slash = '\0';
+        char cmd[MAX_CMD_LEN];
+        int cmd_len = snprintf(cmd, sizeof(cmd), "mkdir -p \"%s\"", full_path);
+        if (cmd_len >= MAX_CMD_LEN) return;
+        system(cmd);
+        *last_slash = '/';
+
+        DBG("compile_with_coverage: %s -> %s\n", cfile, full_path);
+
+        pid_t pid = fork();
+        if (pid == 0) {
+                const char* new_argv[argc + 16];
+                int pos = 0;
+                new_argv[pos++] = "clang";
+                new_argv[pos++] = "-fprofile-instr-generate";
+                new_argv[pos++] = "-fcoverage-mapping";
+                new_argv[pos++] = "-c";
+                new_argv[pos++] = cfile;
+                new_argv[pos++] = "-o";
+                new_argv[pos++] = full_path;
+                /* pass through the original compile flags (already-parsed cflags) */
+                for (int i = 0; i < argc; ++i) {
+                        new_argv[pos++] = argv[i];
+                }
+                new_argv[pos++] = NULL;
+                execvp("clang", (char**)new_argv);
+                _exit(127);
+        } else if (pid != -1) {
+                int wstatus = 0;
+                waitpid(pid, &wstatus, 0);
+                if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+                        DBG("compile_with_coverage failed for %s: exit=%d\n",
+                            cfile, WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : -1);
+                }
+        } else {
+                DBG("compile_with_coverage fork failed: errno=%d\n", errno);
+        }
+}
+
 static void discover_cfile(int argc, char* argv[], const char* project_root, const char* feature_root) {
-        if (argc <= 0) return;
 
         char** cflags = calloc((size_t)argc, sizeof(char*)); // 保存-I, -D, -U, -include
         char** cfiles = calloc((size_t)argc, sizeof(char*)); // 保存当前编译的C文件.
@@ -346,6 +423,10 @@ static void discover_cfile(int argc, char* argv[], const char* project_root, con
                 const char* file = cfiles[i];
                 if (!file) break;
                 preprocess_cfile(argv[0], cnt, cflags, file, project_root, feature_root);
+                /* Case 2: automatic coverage instrumentation via clang */
+                if (getenv(C2RUST_COV) && !getenv(C2RUST_COV_INSTRUMENTED)) {
+                        compile_with_coverage(cnt, cflags, file, project_root, feature_root);
+                }
         }
 fail:
         if (cfiles) {
@@ -428,12 +509,74 @@ fail:
         close(fd);
 }
 
+/*
+ * Save the absolute paths of instrumented .a files when C2RUST_COV and
+ * C2RUST_COV_INSTRUMENTED are both set (Case 1).  Writes to
+ * <feature_root>/c/cov_targets.list, one path per line, deduplicating.
+ * full_paths[] entries are heap-allocated (from realpath) and must be freed
+ * by the caller.
+ */
+static void cov_targets_save(char* full_paths[], int cnt, const char* feature_root) {
+        if (cnt == 0) return;
+
+        char buf[MAX_CMD_LEN];
+        int len = snprintf(buf, MAX_CMD_LEN, "mkdir -p %s/c", feature_root);
+        if (len >= MAX_CMD_LEN) return;
+        system(buf);
+
+        len = snprintf(buf, MAX_CMD_LEN, "%s/c/cov_targets.list", feature_root);
+        if (len >= MAX_CMD_LEN) return;
+
+        int fd = open(buf, O_CREAT | O_RDWR, 0666);
+        if (fd == -1) return;
+
+        if (flock(fd, LOCK_EX) != 0) {
+                close(fd);
+                return;
+        }
+
+        char content[MAX_CMD_LEN] = {0};
+        ssize_t content_len = read(fd, content, sizeof(content) - 1);
+        if (content_len > 0) {
+                content[content_len - 1] = 0;
+        }
+
+        lseek(fd, 0, SEEK_END);
+        for (int i = 0; i < cnt; ++i) {
+                if (!full_paths[i]) continue;
+                if (content_len <= 0 || !strstr(content, full_paths[i])) {
+                        dprintf(fd, "%s\n", full_paths[i]);
+                }
+        }
+        close(fd);
+}
+
+/*
+ * Like get_static_lib() but returns the realpath (heap-allocated, caller must
+ * free) instead of just the filename.  Returns NULL if the file is not a
+ * valid static library under project_root.
+ */
+static char* get_static_lib_fullpath(char* path, const char* project_root) {
+        char* real_path = realpath(path, 0);
+        if (!real_path) return 0;
+        const char* tmp = strip_prefix(real_path, project_root);
+        if (!tmp) { free(real_path); return 0; }
+
+        char* lib = get_file(path);
+        if (strncmp(lib, "lib", 3) != 0) { free(real_path); return 0; }
+        int len = strlen(lib);
+        if (len > 5 && strcmp(&lib[len - 2], ".a") != 0) { free(real_path); return 0; }
+        return real_path; /* caller must free */
+}
+
 static void discover_target(int argc, char* argv[], const char* project_root, const char* feature_root) {
         if (argc <= 0) return;
 
         char** libs = calloc((size_t)argc, sizeof(char*));
-        if (!libs) return;
+        char** cov_full_paths = calloc((size_t)argc, sizeof(char*));
+        if (!libs || !cov_full_paths) goto fail;
         int pos = 0;
+        int cov_pos = 0;
 
         if (getenv(C2RUST_LD_SKIP)) goto fail;
 
@@ -441,6 +584,11 @@ static void discover_target(int argc, char* argv[], const char* project_root, co
                 char* static_lib = get_static_lib(argv[i], project_root);
                 if (static_lib) {
                         libs[pos++] = static_lib;
+                        /* Case 1: also collect full paths of instrumented .a files */
+                        if (getenv(C2RUST_COV) && getenv(C2RUST_COV_INSTRUMENTED)) {
+                                char* fp = get_static_lib_fullpath(argv[i], project_root);
+                                if (fp) cov_full_paths[cov_pos++] = fp;
+                        }
                 } else if (strncmp(argv[i], "-o", 2) == 0) {
                         if (argv[i][2] == 0 && i < argc - 1) {
                             libs[pos++] = get_file(argv[i + 1]);
@@ -450,8 +598,15 @@ static void discover_target(int argc, char* argv[], const char* project_root, co
                 }
         }
         target_save(libs, pos, feature_root);
+        if (cov_pos > 0) {
+                cov_targets_save(cov_full_paths, cov_pos, feature_root);
+        }
 fail:
-        free(libs);
+        if (cov_full_paths) {
+                for (int i = 0; i < cov_pos; ++i) free(cov_full_paths[i]);
+                free(cov_full_paths);
+        }
+        if (libs) free(libs);
 }
 
 /*
