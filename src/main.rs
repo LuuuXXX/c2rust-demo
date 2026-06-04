@@ -3,6 +3,8 @@ mod error;
 mod layout;
 mod selector;
 mod split;
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 use crate::error::Result;
 use clap::{Args, Parser, Subcommand};
@@ -107,6 +109,14 @@ fn run_init(args: InitArgs) -> Result<()> {
     // Step 2: run build with LD_PRELOAD
     // ----------------------------------------------------------------
     capture::run_with_hook(&cwd, build_cmd, &project_root, &lo.feature_root, &hook_so)?;
+
+    // ----------------------------------------------------------------
+    // Step 2b: optionally pack coverage library
+    // ----------------------------------------------------------------
+    if let Some(cov_lib) = capture::post_build_cov(&lo)? {
+        lo.save_cov_lib_path(&cov_lib)?;
+        println!("Coverage library recorded: {}", cov_lib.display());
+    }
 
     // ----------------------------------------------------------------
     // Step 3: scan captured .c2rust files

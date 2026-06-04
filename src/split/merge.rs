@@ -1280,4 +1280,182 @@ unsafe extern "C" {
         assert!(content.contains("`local_ffi_fn`"));
         assert!(content.contains("fun_do_work.rs"));
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge-case tests
+    // -----------------------------------------------------------------------
+
+    /// merge 在 rust/src 目录不存在时应返回错误。
+    #[test]
+    fn merge_errors_when_src_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let feat = make_merge_feature(&tmp);
+        // 不创建 rust/src 目录
+        let result = feat.merge();
+        assert!(result.is_err(), "merge should fail when rust/src is absent");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("run init first") || msg.contains("does not exist"),
+            "error should hint to run init first, got: {msg}"
+        );
+    }
+
+    /// merge 在没有 mod_* 子目录时应成功并提前返回，不创建 src.2。
+    #[test]
+    fn merge_no_op_when_no_mod_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let feature_root = tmp.path().join(".c2rust/default");
+        let src = feature_root.join("rust/src");
+        fs::create_dir_all(&src).unwrap();
+        // lib.rs 但没有 mod_* 子目录
+        fs::write(src.join("lib.rs"), "// empty\n").unwrap();
+
+        let feat = make_merge_feature(&tmp);
+        feat.merge().unwrap(); // 应当正常返回
+
+        // src.2 目录不应被创建
+        assert!(
+            !feature_root.join("rust/src.2").exists(),
+            "src.2 should not be created when there are no mod_* dirs"
+        );
+    }
+
+    /// 第二次执行 merge 时 rust/src 已是 symlink，应当成功替换而不报错。
+    #[test]
+    fn merge_second_run_replaces_existing_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let feature_root = tmp.path().join(".c2rust/default");
+
+        let src = feature_root.join("rust/src");
+        let mod_dir = src.join("mod_foo");
+        fs::create_dir_all(&mod_dir).unwrap();
+        fs::write(mod_dir.join("mod.rs"), "use super::*;\n").unwrap();
+        fs::write(src.join("lib.rs"), "// generated\nmod mod_foo;\n").unwrap();
+
+        let feat = make_merge_feature(&tmp);
+        feat.merge().unwrap();
+
+        // 第一次 merge 后 src 是 symlink；再次运行 merge 需要先重建 src 目录
+        // 模拟第二次 merge：将 src 恢复为真实目录（像用户重跑 init 那样）
+        let src_path = feature_root.join("rust/src");
+        fs::remove_file(&src_path).unwrap(); // 移除 symlink
+        fs::create_dir_all(src_path.join("mod_foo")).unwrap();
+        fs::write(src_path.join("mod_foo/mod.rs"), "use super::*;\n").unwrap();
+        fs::write(src_path.join("lib.rs"), "// regenerated\nmod mod_foo;\n").unwrap();
+
+        // 第二次 merge 应成功
+        let feat2 = make_merge_feature(&tmp);
+        feat2.merge().unwrap();
+
+        assert!(
+            feature_root.join("rust/src").is_symlink(),
+            "src should be a symlink after second merge"
+        );
+    }
+
+    /// is_ffi_glob_import 应当识别 core::ffi::* 和 std::ffi::* 的各种写法。
+    #[test]
+    fn is_ffi_glob_import_various_forms() {
+        // 标准写法
+        let item: syn::Item = syn::parse_str("use core::ffi::*;").unwrap();
+        assert!(Feature::is_ffi_glob_import(&item), "core::ffi::*");
+
+        let item: syn::Item = syn::parse_str("use ::core::ffi::*;").unwrap();
+        assert!(Feature::is_ffi_glob_import(&item), "::core::ffi::*");
+
+        let item: syn::Item = syn::parse_str("use std::ffi::*;").unwrap();
+        assert!(Feature::is_ffi_glob_import(&item), "std::ffi::*");
+
+        // 不应匹配的写法
+        let item: syn::Item = syn::parse_str("use core::ffi::c_int;").unwrap();
+        assert!(!Feature::is_ffi_glob_import(&item), "non-glob import");
+
+        let item: syn::Item = syn::parse_str("use crate::ffi::*;").unwrap();
+        assert!(!Feature::is_ffi_glob_import(&item), "crate::ffi::*");
+
+        let item: syn::Item = syn::parse_str("fn foo() {}").unwrap();
+        assert!(!Feature::is_ffi_glob_import(&item), "function item");
+    }
+
+    /// scan_src_mod_dirs 在空目录时应返回空列表。
+    #[test]
+    fn scan_src_mod_dirs_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        let names = Feature::scan_src_mod_dirs(&src).unwrap();
+        assert!(names.is_empty());
+    }
+
+    /// collect_symbol_items 对空文件应静默跳过，不报错，不追加任何 item。
+    #[test]
+    fn collect_symbol_items_empty_file_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let empty = tmp.path().join("empty.rs");
+        fs::write(&empty, "   \n  ").unwrap();
+        let mut items: Vec<syn::Item> = Vec::new();
+        Feature::collect_symbol_items(&empty, &mut items).unwrap();
+        assert!(items.is_empty(), "empty file should not add any items");
+    }
+
+    /// collect_symbol_items 应当过滤掉 `use super::*;` 导入。
+    #[test]
+    fn collect_symbol_items_skips_use_super() {
+        let tmp = TempDir::new().unwrap();
+        let rs = tmp.path().join("fun_foo.rs");
+        fs::write(
+            &rs,
+            "use super::*;\npub fn foo() -> i32 { 42 }\n",
+        )
+        .unwrap();
+        let mut items: Vec<syn::Item> = Vec::new();
+        Feature::collect_symbol_items(&rs, &mut items).unwrap();
+        // 只有函数，use super::* 被过滤
+        assert_eq!(items.len(), 1);
+        assert!(
+            Feature::item_name(&items[0]) == Some("foo".to_string()),
+            "should only contain the function"
+        );
+    }
+
+    /// 多个模块各自有独立 FFI 时，lib.rs 中不应出现任何 extern 块（无共享 FFI）。
+    #[test]
+    fn merge_no_shared_ffi_lib_rs_has_no_extern_block() {
+        let tmp = TempDir::new().unwrap();
+        let feature_root = tmp.path().join(".c2rust/default");
+
+        let src = feature_root.join("rust/src");
+        for (mod_name, fn_name) in &[("mod_a", "fn_a_only"), ("mod_b", "fn_b_only")] {
+            let mod_dir = src.join(mod_name);
+            fs::create_dir_all(&mod_dir).unwrap();
+            fs::write(
+                mod_dir.join("mod.rs"),
+                format!(
+                    "use super::*;\nunsafe extern \"C\" {{ pub fn {fn_name}(x: i32) -> i32; }}\n"
+                ),
+            )
+            .unwrap();
+        }
+        fs::write(
+            src.join("lib.rs"),
+            "// generated\nmod mod_a;\nmod mod_b;\n",
+        )
+        .unwrap();
+
+        let feat = make_merge_feature(&tmp);
+        feat.merge().unwrap();
+
+        let lib_content =
+            fs::read_to_string(feature_root.join("rust/src.2/lib.rs")).unwrap();
+
+        // 唯一 FFI 不应出现在 lib.rs 中
+        assert!(
+            !lib_content.contains("fn_a_only"),
+            "unique FFI should not appear in lib.rs"
+        );
+        assert!(
+            !lib_content.contains("fn_b_only"),
+            "unique FFI should not appear in lib.rs"
+        );
+    }
 }
