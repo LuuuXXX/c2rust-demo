@@ -31,6 +31,10 @@ struct InitArgs {
     #[arg(long, default_value = "default")]
     feature: String,
 
+    /// Enable LLVM coverage instrumentation for C sources (requires clang + cargo-llvm-cov)
+    #[arg(long, default_value_t = false)]
+    coverage: bool,
+
     /// Build command to execute (use after '--')
     /// Example: c2rust-demo init -- make -j4
     #[arg(
@@ -106,7 +110,7 @@ fn run_init(args: InitArgs) -> Result<()> {
     // ----------------------------------------------------------------
     // Step 2: run build with LD_PRELOAD
     // ----------------------------------------------------------------
-    capture::run_with_hook(&cwd, build_cmd, &project_root, &lo.feature_root, &hook_so)?;
+    capture::run_with_hook(&cwd, build_cmd, &project_root, &lo.feature_root, &hook_so, args.coverage)?;
 
     // ----------------------------------------------------------------
     // Step 3: scan captured .c2rust files
@@ -140,7 +144,7 @@ fn run_init(args: InitArgs) -> Result<()> {
     // ----------------------------------------------------------------
     println!("\nRunning init split...");
     let feature_obj = split::Feature::new_with_selection(&project_root, feature, &selected)?;
-    feature_obj.init()?;
+    feature_obj.init(args.coverage)?;
 
     println!("\n✓ c2rust-demo init completed successfully!");
     println!("\nOutput structure:");

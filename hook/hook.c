@@ -29,6 +29,8 @@ static const char* C2RUST_LD = "C2RUST_LD";
 static const char* C2RUST_CC_SKIP = "C2RUST_CC_SKIP";
 static const char* C2RUST_LD_SKIP = "C2RUST_LD_SKIP";
 static const char* C2RUST_DEBUG_ENV = "C2RUST_DEBUG";
+/* 设置该变量时，对 clang 编译器在预处理命令中注入 LLVM 覆盖率插桩选项 */
+static const char* C2RUST_COVERAGE_ENV = "C2RUST_COVERAGE";
 
 static const char* cc_names[] = {"gcc", "clang", "cc"};
 static const char* ld_names[] = {"ld", "lld"};
@@ -295,7 +297,16 @@ static void preprocess_cfile(const char* cc, int argc, char* argv[], const char*
 
         pid_t pid = fork();
         if (pid == 0) {
-            const char* new_argv[argc + 8];
+            /* 当 C2RUST_COVERAGE 已设置且编译器为 clang 时注入 LLVM 覆盖率标志.
+             * gcc 不支持 -fprofile-instr-generate/-fcoverage-mapping, 故仅对 clang. */
+            const char* cov_flag1 = NULL;
+            const char* cov_flag2 = NULL;
+            if (getenv(C2RUST_COVERAGE_ENV) &&
+                    is_name_match(path_basename(cc), "clang")) {
+                cov_flag1 = "-fprofile-instr-generate";
+                cov_flag2 = "-fcoverage-mapping";
+            }
+            const char* new_argv[argc + 10];
             int pos = 0;
             new_argv[pos++] = cc;
             new_argv[pos++] = "-E";
@@ -304,6 +315,10 @@ static void preprocess_cfile(const char* cc, int argc, char* argv[], const char*
             new_argv[pos++] = "-o";
             new_argv[pos++] = full_path;
             new_argv[pos++] = "-P";
+            if (cov_flag1) {
+                new_argv[pos++] = cov_flag1;
+                new_argv[pos++] = cov_flag2;
+            }
             for (int i = 0; i < argc; ++i) {
                     new_argv[pos++] = argv[i];
             }

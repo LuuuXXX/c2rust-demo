@@ -32,12 +32,16 @@ pub fn build_hook() -> Result<PathBuf> {
 }
 
 /// Execute the user-supplied build command with LD_PRELOAD set to libhook.so.
+///
+/// When `coverage` is true, `C2RUST_COVERAGE=1` is set so that the hook
+/// injects LLVM coverage flags into clang preprocessing invocations.
 pub fn run_with_hook(
     build_dir: &Path,
     cmd: &[String],
     project_root: &Path,
     feature_root: &Path,
     hook_so: &Path,
+    coverage: bool,
 ) -> Result<()> {
     if cmd.is_empty() {
         return Err(anyhow!("build command is empty"));
@@ -57,16 +61,26 @@ pub fn run_with_hook(
     println!("  C2RUST_PROJECT_ROOT = {}", abs_project_root.display());
     println!("  C2RUST_FEATURE_ROOT = {}", abs_feature_root.display());
     println!("  LD_PRELOAD          = {}", abs_hook.display());
+    if coverage {
+        println!("  C2RUST_COVERAGE     = 1  (LLVM instrumentation enabled for clang)");
+    }
     println!();
 
-    let status = Command::new(&cmd[0])
+    let mut cmd_builder = Command::new(&cmd[0]);
+    cmd_builder
         .args(&cmd[1..])
         .current_dir(build_dir)
         .env("LD_PRELOAD", &abs_hook)
         .env("C2RUST_PROJECT_ROOT", &abs_project_root)
         .env("C2RUST_FEATURE_ROOT", &abs_feature_root)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    if coverage {
+        cmd_builder.env("C2RUST_COVERAGE", "1");
+    }
+
+    let status = cmd_builder
         .status()
         .map_err(|e| anyhow!("failed to spawn '{}': {}", cmd[0], e))?;
 
