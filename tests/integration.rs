@@ -11,7 +11,7 @@ fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("simple")
+        .join("cjson")
 }
 
 /// Build the hook library and return its path, or `None` on failure.
@@ -237,18 +237,13 @@ fn full_init_creates_rust_project() {
     let project_root = tmp.path();
     let fixture = fixture_dir();
 
-    // Copy fixture files into the temp directory.  The simple fixture only has
-    // flat .c files directly under src/, so we copy those files (no nested
-    // subdirectories) along with the Makefile.
-    let src_fixture = fixture.join("src");
-    let src_tmp = project_root.join("src");
-    std::fs::create_dir_all(&src_tmp).unwrap();
-    for entry in std::fs::read_dir(&src_fixture).unwrap().flatten() {
+    // Copy fixture files into the temp directory.  The cjson fixture has
+    // cJSON.c, cJSON.h, and a Makefile directly at the root level.
+    for entry in std::fs::read_dir(&fixture).unwrap().flatten() {
         if entry.path().is_file() {
-            std::fs::copy(entry.path(), src_tmp.join(entry.file_name())).unwrap();
+            std::fs::copy(entry.path(), project_root.join(entry.file_name())).unwrap();
         }
     }
-    std::fs::copy(fixture.join("Makefile"), project_root.join("Makefile")).unwrap();
 
     // Clean first (operates on the copy)
     let _ = Command::new("make")
