@@ -113,7 +113,7 @@ echo "exit code: $?"
 
 ### 若 cargo check 失败 — 迭代修复循环
 
-最多循环 **5 次**，每轮：
+持续循环，无次数上限，每轮：
 
 1. 读取 `/tmp/cargo-check.log`，提取所有 `error[E...]` 条目
 2. 按下表修复：
@@ -129,7 +129,7 @@ echo "exit code: $?"
 
 3. 修改 `.c2rust/default/rust/src.2/` 下的 `.rs` 文件（不要改动 `lib.rs` 中的 `#![allow(...)]` 属性）
 4. 重新运行 `cargo check`
-5. 若 5 轮后仍失败，报告剩余错误并请求用户提供额外信息
+5. 每完成 **10 轮**仍未通过时，向用户汇报当前剩余错误，并询问是否继续修复；用户确认后继续，用户放弃则停止并报告现状
 
 > **提示**：生成的 `lib.rs` 已包含大量 `#![allow(...)]`，`unused_imports` / `dead_code`
 > 等 **warning** 可安全忽略。
