@@ -1,7 +1,7 @@
 # Verify the generate-rust-ffi SKILL end-to-end
 #
 # Purpose: Validate that the workflow described in
-#          .github/agents/generate-rust-ffi.md works correctly against the
+#          docs/SKILL.md works correctly against the
 #          real-world DaveGamble/cJSON project.
 #
 # The workflow exercises the three main deliverables of the SKILL:
