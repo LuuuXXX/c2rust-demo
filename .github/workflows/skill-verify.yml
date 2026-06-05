@@ -201,37 +201,81 @@ jobs:
           [ "$FAIL" -eq 0 ] || exit 1
 
       # ----------------------------------------------------------------
-      # 13. SKILL Step 4: add a minimal integration test and run
-      #     cargo llvm-cov to produce a C-side coverage report.
+      # 13. SKILL Step 4: add a real integration test that calls cJSON
+      #     C functions, then run cargo llvm-cov to produce a C-side
+      #     coverage report.
       #
-      #     The test simply links the binary — even calling no C functions
-      #     demonstrates that the instrumented libcov.a links correctly
-      #     and that cargo llvm-cov can produce a report.  Real projects
-      #     should write tests that actually invoke the C API.
+      #     The test declares the cJSON API with extern "C" blocks so it
+      #     does not need to import the generated module by name.  Calling
+      #     real C functions ensures LLVM profdata records C-side coverage.
       # ----------------------------------------------------------------
       - name: SKILL Step 4 — add integration test to generated Rust project
         working-directory: /tmp/cjson/.c2rust/default/rust
         run: |
           mkdir -p tests
 
-          cat > tests/ffi_smoke.rs << 'EOF'
-          // Minimal smoke test that links the coverage-instrumented C library.
-          // A real project would call C functions here to generate meaningful
-          // C-side coverage data.
-          #[test]
-          fn link_succeeds() {
-              // If this test compiles and links, libcov.a was linked correctly.
-              let _ = 42_u64.wrapping_add(1);
-          }
-          EOF
+          cat > tests/ffi_smoke.rs << 'RUST_EOF'
+// FFI smoke tests for the coverage-instrumented cJSON library.
+// Calling real cJSON C functions ensures that LLVM source-based coverage
+// data is recorded for cJSON.c when cargo llvm-cov runs these tests.
+#![allow(non_snake_case)]
+
+use std::os::raw::{c_char, c_void};
+
+extern "C" {
+    fn cJSON_Version() -> *const c_char;
+    fn cJSON_CreateNull() -> *mut c_void;
+    fn cJSON_CreateTrue() -> *mut c_void;
+    fn cJSON_CreateFalse() -> *mut c_void;
+    fn cJSON_Delete(item: *mut c_void);
+    fn cJSON_Parse(value: *const c_char) -> *mut c_void;
+}
+
+/// Verify that cJSON_Version() returns a non-null pointer (exercises the
+/// version string path in cJSON.c).
+#[test]
+fn cjson_version_not_null() {
+    let v = unsafe { cJSON_Version() };
+    assert!(!v.is_null(), "cJSON_Version() returned null");
+}
+
+/// Create a JSON null item and immediately free it.
+#[test]
+fn cjson_create_and_delete_null() {
+    let item = unsafe { cJSON_CreateNull() };
+    assert!(!item.is_null(), "cJSON_CreateNull() returned null");
+    unsafe { cJSON_Delete(item) };
+}
+
+/// Create JSON boolean items and free them.
+#[test]
+fn cjson_create_bool_items() {
+    let t = unsafe { cJSON_CreateTrue() };
+    assert!(!t.is_null(), "cJSON_CreateTrue() returned null");
+    unsafe { cJSON_Delete(t) };
+
+    let f = unsafe { cJSON_CreateFalse() };
+    assert!(!f.is_null(), "cJSON_CreateFalse() returned null");
+    unsafe { cJSON_Delete(f) };
+}
+
+/// Parse a simple JSON string to exercise the parser path in cJSON.c.
+#[test]
+fn cjson_parse_simple_json() {
+    let json = b"true\0".as_ptr() as *const c_char;
+    let item = unsafe { cJSON_Parse(json) };
+    assert!(!item.is_null(), "cJSON_Parse(\"true\") returned null");
+    unsafe { cJSON_Delete(item) };
+}
+RUST_EOF
 
           # Register the test binary in Cargo.toml
-          cat >> Cargo.toml << 'EOF'
+          cat >> Cargo.toml << 'TOML_EOF'
 
-          [[test]]
-          name = "ffi_smoke"
-          path = "tests/ffi_smoke.rs"
-          EOF
+[[test]]
+name = "ffi_smoke"
+path = "tests/ffi_smoke.rs"
+TOML_EOF
 
           echo "Integration test written to tests/ffi_smoke.rs"
           echo "Cargo.toml updated with [[test]] entry"
@@ -249,22 +293,41 @@ jobs:
           echo ""
           echo "Coverage summary written to /tmp/coverage-summary.txt"
 
-          # Verify the report contains a coverage table (Filename/Lines/Functions headers)
+          # Verify the report contains a coverage table header
           if ! grep -qi "Filename\|Lines\|Functions" /tmp/coverage-summary.txt; then
             echo "  [FAIL] cargo llvm-cov did not produce a coverage table"
             cat /tmp/coverage-summary.txt
             exit 1
           fi
-          # Check separately for fatal errors that indicate a broken run
+          # Reject fatal errors
           if grep -qi "panicked at\|fatal error" /tmp/coverage-summary.txt; then
             echo "  [FAIL] cargo llvm-cov reported a fatal error"
             cat /tmp/coverage-summary.txt
             exit 1
           fi
-          echo "  [PASS] C-side coverage report generated"
+          # Verify that the C source file actually appears with non-zero coverage.
+          # When tests call cJSON C functions, cJSON.c must appear in the report.
+          if ! grep -qi "cJSON\.c" /tmp/coverage-summary.txt; then
+            echo "  [FAIL] cJSON.c did not appear in the coverage report"
+            echo "         Make sure the ffi_smoke tests call real cJSON functions."
+            cat /tmp/coverage-summary.txt
+            exit 1
+          fi
+          # Ensure the TOTAL line is not all-zero.
+          # When cargo llvm-cov produces no coverage data it prints:
+          #   TOTAL   0   0   -   0   0   -   0   0   -   0   0   -
+          # where the dash ("-") means "no data".  A non-zero run has a
+          # percentage in that column (e.g. "75.00%"), so checking for
+          # "0   0   -" at the start of the TOTAL line is reliable.
+          if grep -E "^TOTAL[[:space:]]+0[[:space:]]+0[[:space:]]+-" /tmp/coverage-summary.txt; then
+            echo "  [FAIL] TOTAL shows zero covered regions — no C code was exercised"
+            cat /tmp/coverage-summary.txt
+            exit 1
+          fi
+          echo "  [PASS] C-side coverage report generated with non-zero coverage"
 
       # ----------------------------------------------------------------
-      # 14. Generate lcov report artifact (for download / external tools)
+      # 14. Generate lcov report (for download / external tools)
       # ----------------------------------------------------------------
       - name: Generate lcov coverage report
         env:
@@ -282,7 +345,20 @@ jobs:
           fi
 
       # ----------------------------------------------------------------
-      # 15. Show generated output tree (always, for debugging)
+      # 15. Generate HTML coverage report (human-readable)
+      # ----------------------------------------------------------------
+      - name: Generate HTML coverage report
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          cargo llvm-cov \
+            --manifest-path /tmp/cjson/.c2rust/default/rust/Cargo.toml \
+            --html --output-dir /tmp/cov-html
+          echo "HTML coverage report written to /tmp/cov-html/"
+          ls /tmp/cov-html/ || echo "(empty)"
+
+      # ----------------------------------------------------------------
+      # 16. Show generated output tree (always, for debugging)
       # ----------------------------------------------------------------
       - name: Show generated output tree
         if: always()
@@ -301,7 +377,7 @@ jobs:
           cat /tmp/coverage-summary.txt 2>/dev/null || echo "(not generated)"
 
       # ----------------------------------------------------------------
-      # 16. Upload artifacts
+      # 17. Upload artifacts
       # ----------------------------------------------------------------
       - name: Upload .c2rust artifact
         if: always()
@@ -311,10 +387,18 @@ jobs:
           path: /tmp/cjson/.c2rust/
           if-no-files-found: warn
 
-      - name: Upload coverage report artifact
+      - name: Upload lcov coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: skill-verify-coverage
+          name: skill-verify-coverage-lcov
           path: /tmp/c-coverage.lcov
+          if-no-files-found: warn
+
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-verify-coverage-html
+          path: /tmp/cov-html/
           if-no-files-found: warn
