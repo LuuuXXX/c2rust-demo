@@ -82,8 +82,22 @@ jobs:
       # ------------------------------------------------------------------
       # 8. Generate test coverage report (Rust)
       # ------------------------------------------------------------------
-      - name: Generate coverage report
+      - name: Generate coverage report (summary)
         run: cargo llvm-cov --summary-only -- --test-threads=1
+
+      # ------------------------------------------------------------------
+      # 8b. Export lcov coverage report as artifact
+      # ------------------------------------------------------------------
+      - name: Generate coverage report (lcov)
+        run: cargo llvm-cov --lcov --output-path lcov.info -- --test-threads=1
+
+      - name: Upload lcov coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage-lcov
+          path: lcov.info
+          if-no-files-found: warn
 
       # ------------------------------------------------------------------
       # 9. Verify C coverage via instrumented fixture

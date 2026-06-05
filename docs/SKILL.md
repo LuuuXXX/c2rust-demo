@@ -178,26 +178,90 @@ echo "exit code: $?"
 
 ### 4a. 编写 FFI 集成测试
 
-在 `.c2rust/default/rust/tests/ffi_smoke.rs` 中创建测试（目录不存在时先创建）：
+在 `.c2rust/default/rust/tests/ffi_smoke.rs` 中创建测试（目录不存在时先创建）。
+
+> **重要**：仅写 `link_succeeds` 占位测试会导致覆盖率 TOTAL=0，因为没有执行任何 C 函数。
+> 必须在测试中调用真实 C 函数，LLVM 才能记录 C 侧的覆盖率数据。
+
+**第一步：查看生成的 FFI 绑定，找出可用的 C 函数**
+
+```bash
+# 查看合并后的 Rust 源文件，找出已绑定的 C 函数名
+grep -h "pub fn\|pub unsafe fn" .c2rust/default/rust/src.2/*.rs | head -20
+```
+
+**第二步：编写调用这些 C 函数的测试**
+
+在 `tests/ffi_smoke.rs` 中，用 `extern "C"` 块声明要调用的函数，然后在测试中调用它们：
 
 ```rust
 // tests/ffi_smoke.rs
 // 调用生成的 FFI 函数以触发 C 侧代码路径，产生覆盖率数据。
-// 根据实际 C 项目 API 替换 <MODULE> 和函数名。
+// 根据实际 C 项目 API 替换函数名和签名。
+#![allow(non_snake_case)]
 
-// 示例（C 项目暴露了 init/cleanup 函数）：
+use std::os::raw::{c_char, c_void};
+
+// 示例：声明要测试的 C 函数（根据实际 API 修改）
+extern "C" {
+    // 替换为 C 项目实际暴露的函数
+    // fn my_function(arg: c_int) -> c_int;
+    // fn my_init() -> *mut c_void;
+    // fn my_cleanup(ctx: *mut c_void);
+}
+
+// 示例测试（根据实际 C API 替换）：
 // #[test]
-// fn smoke_init_cleanup() {
-//     unsafe {
-//         let ctx = <crate_name>::<MODULE>::init();
-//         <crate_name>::<MODULE>::cleanup(ctx);
-//     }
+// fn smoke_my_function() {
+//     let result = unsafe { my_function(0) };
+//     assert_eq!(result, 0);
 // }
 
-// 最简验证（仅确认链接成功）：
+// 最简验证（仅确认链接成功，不产生 C 侧覆盖率）：
 #[test]
 fn link_succeeds() {
     let _ = 42_u64.wrapping_add(1);
+}
+```
+
+**如何根据 C 项目 API 补充真实测试：**
+
+1. 运行 `grep "pub fn\|extern \"C\"" .c2rust/default/rust/src.2/*.rs` 找出所有绑定函数
+2. 选取几个有代表性的函数（初始化/清理、简单计算、字符串处理等）
+3. 在 `unsafe {}` 块中调用这些函数，验证返回值
+
+**以 cJSON 项目为例**（该 C 项目暴露了 `cJSON_Version`、`cJSON_CreateNull`、`cJSON_Delete` 等函数）：
+
+```rust
+#![allow(non_snake_case)]
+use std::os::raw::{c_char, c_void};
+
+extern "C" {
+    fn cJSON_Version() -> *const c_char;
+    fn cJSON_CreateNull() -> *mut c_void;
+    fn cJSON_Delete(item: *mut c_void);
+    fn cJSON_Parse(value: *const c_char) -> *mut c_void;
+}
+
+#[test]
+fn cjson_version_not_null() {
+    let v = unsafe { cJSON_Version() };
+    assert!(!v.is_null());
+}
+
+#[test]
+fn cjson_create_and_delete_null() {
+    let item = unsafe { cJSON_CreateNull() };
+    assert!(!item.is_null());
+    unsafe { cJSON_Delete(item) };
+}
+
+#[test]
+fn cjson_parse_simple() {
+    let json = b"true\0".as_ptr() as *const c_char;
+    let item = unsafe { cJSON_Parse(json) };
+    assert!(!item.is_null());
+    unsafe { cJSON_Delete(item) };
 }
 ```
 
@@ -209,12 +273,10 @@ name = "ffi_smoke"
 path = "tests/ffi_smoke.rs"
 ```
 
-根据 C 项目实际暴露的函数，在测试中调用这些函数以触发更多 C 侧代码路径，从而获得有意义的覆盖率数据。
-
 ### 4b. 运行 cargo llvm-cov 输出覆盖率报告
 
 ```bash
-# 终端摘要
+# 终端摘要（包含 C 侧文件覆盖率）
 RUSTC_BOOTSTRAP=1 cargo llvm-cov \
   --manifest-path .c2rust/default/rust/Cargo.toml \
   --summary-only
@@ -223,11 +285,20 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov \
 RUSTC_BOOTSTRAP=1 cargo llvm-cov \
   --manifest-path .c2rust/default/rust/Cargo.toml \
   --lcov --output-path c-coverage.lcov
+
+# HTML 可视化报告（在浏览器中查看每行覆盖情况）
+RUSTC_BOOTSTRAP=1 cargo llvm-cov \
+  --manifest-path .c2rust/default/rust/Cargo.toml \
+  --html --output-dir cov-html
+# 打开 cov-html/index.html 查看交互式覆盖率报告
 ```
 
 报告同时包含：
 - **Rust 侧**：`lib.rs`、`mod_*.rs` 等文件的行覆盖率
 - **C 侧**：原始 C 源文件（如 `foo.c`、`bar.c`）的函数/行覆盖率
+
+> **注意**：若摘要中 C 源文件的覆盖率为 0 或 C 文件根本不出现，说明测试没有调用任何 C 函数。
+> 请检查 `tests/ffi_smoke.rs` 是否包含了真实的 C 函数调用（参见 4a 步骤）。
 
 > **原理**：`build.rs` 令测试二进制链接了 `libcov.a`（clang 插桩编译的目标文件）。
 > 当测试调用 C 函数时，LLVM profdata 记录对应 C 源码路径；`cargo llvm-cov` 合并后即可输出 C 文件覆盖率。
@@ -255,9 +326,15 @@ c2rust-demo merge
 RUSTC_BOOTSTRAP=1 cargo check \
   --manifest-path .c2rust/default/rust/Cargo.toml
 # （如需修复错误，参考步骤三的迭代修复循环）
+
+# 编写真实调用 C 函数的测试（见步骤四 4a）后运行覆盖率报告：
 RUSTC_BOOTSTRAP=1 cargo llvm-cov \
   --manifest-path .c2rust/default/rust/Cargo.toml \
   --summary-only
+# HTML 可视化报告（可选）：
+RUSTC_BOOTSTRAP=1 cargo llvm-cov \
+  --manifest-path .c2rust/default/rust/Cargo.toml \
+  --html --output-dir cov-html
 ```
 
 ---
