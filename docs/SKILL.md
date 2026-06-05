@@ -186,6 +186,7 @@ echo "exit code: $?"
 **第一步：查看生成的 FFI 绑定，找出可用的 C 函数**
 
 ```bash
+# src.2/ 是 c2rust-demo merge 后的最终输出目录（src/ 符号链接指向它）
 # 查看合并后的 Rust 源文件，找出已绑定的 C 函数名
 grep -h "pub fn\|pub unsafe fn" .c2rust/default/rust/src.2/*.rs | head -20
 ```

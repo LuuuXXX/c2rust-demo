@@ -313,7 +313,12 @@ TOML_EOF
             cat /tmp/coverage-summary.txt
             exit 1
           fi
-          # Ensure the TOTAL line is not all-zero (dash means no data at all).
+          # Ensure the TOTAL line is not all-zero.
+          # When cargo llvm-cov produces no coverage data it prints:
+          #   TOTAL   0   0   -   0   0   -   0   0   -   0   0   -
+          # where the dash ("-") means "no data".  A non-zero run has a
+          # percentage in that column (e.g. "75.00%"), so checking for
+          # "0   0   -" at the start of the TOTAL line is reliable.
           if grep -E "^TOTAL[[:space:]]+0[[:space:]]+0[[:space:]]+-" /tmp/coverage-summary.txt; then
             echo "  [FAIL] TOTAL shows zero covered regions — no C code was exercised"
             cat /tmp/coverage-summary.txt
