@@ -1,8 +1,11 @@
 ---
+name: generate-rust-ffi
 description: >
   为任意 C 项目生成 Rust FFI 脚手架（`cargo check` 通过），并可选地输出 C 侧测试覆盖率。
   适用场景：将 C 库集成到 Rust 项目、对 C 代码进行 Rust 侧测试、评估 C 代码的测试覆盖情况。
-  触发词：生成 FFI、Rust 绑定、C to Rust、c2rust、FFI 脚手架、C 覆盖率。
+  触发词：生成 FFI、Rust 绑定、C to Rust、c2rust、FFI 脚手架、C 覆盖率、rust ffi。
+groups:
+  - public
 ---
 
 # 为 C 项目生成 Rust FFI 脚手架
