@@ -33,16 +33,49 @@ description: >
 
 ## 步骤一：运行 init（拦截 C 构建）
 
+### 1a. 询问用户的构建命令
+
+**向用户提问**：
+
+> 请提供您的 C 项目构建命令（例如 `make -j4`、`cmake --build build`、`gcc -c foo.c -I.`）。
+
+等待用户回答后，记录构建命令为 `<用户构建命令>`。
+
+### 1b. 判断构建命令是否支持覆盖率插桩
+
+覆盖率插桩要求 C 源文件使用 **clang** 编译（`-fprofile-instr-generate -fcoverage-mapping`）。根据用户提供的构建命令，**向用户说明并询问**：
+
+> 覆盖率模式需要用 clang 编译 C 源文件。
+> 请判断您的构建命令是否满足以下任一条件：
+> 1. 命令中已使用 `clang`（如 `make CC=clang` 或 `cmake -DCMAKE_C_COMPILER=clang`）
+> 2. 可以通过添加 `CC=clang` 参数切换为 clang（如 `make CC=clang -j4`）
+> 3. 不方便修改构建命令，但可以接受使用 `C2RUST_CC=clang` 让工具仅在插桩步骤替换编译器
+>
+> **您是否需要输出 C 侧测试覆盖率？** 如需要，请确认上述哪种方式适合您的项目。
+
+根据用户回答决定模式：
+
+| 用户回答 | 执行模式 |
+|----------|----------|
+| 不需要覆盖率 | 基础模式，不加 `C2RUST_COV=1` |
+| 需要覆盖率，且构建命令已使用或可切换到 clang | 覆盖率模式：`C2RUST_COV=1`，并在构建命令中添加 `CC=clang`（或等效方式） |
+| 需要覆盖率，但构建命令难以替换编译器 | 覆盖率模式：`C2RUST_CC=clang C2RUST_COV=1`，构建命令保持原样 |
+
+### 1c. 执行 init
+
 在 C 项目根目录执行 `c2rust-demo init`，将原有构建命令原样传入：
 
 ```bash
 cd /path/to/my-c-project
 
 # 基础模式（仅生成 FFI，无覆盖率）
-c2rust-demo init -- <原始构建命令>
+c2rust-demo init -- <用户构建命令>
 
-# 覆盖率模式（同时生成覆盖率插桩库）
-C2RUST_COV=1 c2rust-demo init -- <原始构建命令>
+# 覆盖率模式 —— 构建命令可切换 clang
+C2RUST_COV=1 c2rust-demo init -- <用户构建命令（含 CC=clang）>
+
+# 覆盖率模式 —— 构建命令难以替换编译器时
+C2RUST_CC=clang C2RUST_COV=1 c2rust-demo init -- <用户构建命令>
 ```
 
 **常见构建命令示例：**
